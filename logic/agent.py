@@ -34,7 +34,7 @@ def load_excel(
         system_text = "Dataset describing myBasePay call center tickets."
 
     # Sample Questions
-    sample_questions = []
+    sample_questions: List[str] = []
     if "Questions" in sheet_names:
         df_questions = pd.read_excel(xls, "Questions")
         col = df_questions.columns[0]
@@ -51,44 +51,146 @@ llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
 
 
 # ===================================================
-# BASE CODE GENERATION INSTRUCTIONS
+# FORMAT HELPERS
+# ===================================================
+
+def human_join(names: List[str]) -> str:
+    """Turns ['A', 'B', 'C'] into 'A, B & C'."""
+    names = [str(n) for n in names]
+    if len(names) == 1:
+        return names[0]
+    if len(names) == 2:
+        return f"{names[0]} and {names[1]}"
+    return ", ".join(names[:-1]) + f" & {names[-1]}"
+
+
+def format_seconds(seconds: float) -> str:
+    """Convert seconds into friendly wording."""
+    try:
+        seconds = float(seconds)
+    except Exception:
+        return str(seconds)
+
+    if seconds < 60:
+        return f"{seconds:.0f} seconds"
+
+    minutes, sec = divmod(int(round(seconds)), 60)
+    if minutes < 60:
+        return f"{minutes} min {sec} sec" if sec else f"{minutes} min"
+
+    hours, mins = divmod(minutes, 60)
+    components = []
+    if hours:
+        components.append(f"{hours} hr")
+    if mins:
+        components.append(f"{mins} min")
+    if sec:
+        components.append(f"{sec} sec")
+    return " ".join(components)
+
+
+# ===================================================
+# SPECIAL CASE: WHO SUBMITS MOST TICKETS
+# ===================================================
+
+def answer_who_submits_most(df: pd.DataFrame) -> str:
+    """
+    Always uses Caller.
+    Handles ties.
+    Provides friendly explanation.
+    """
+
+    if "Caller" not in df.columns:
+        return "**Answer:** I don't know.\n\n**Explanation:** This dataset has no `Caller` column."
+
+    counts = df["Caller"].value_counts()
+
+    if counts.empty:
+        return "**Answer:** I don't know.\n\n**Explanation:** No callers found."
+
+    max_count = counts.iloc[0]
+    top_callers = counts[counts == max_count].index.tolist()
+
+    name_str = human_join(top_callers)
+    total_tickets = len(df)
+
+    explanation = (
+        f"{name_str} {'each ' if len(top_callers)>1 else ''}"
+        f"submitted **{max_count}** ticket(s), "
+        f"which is the highest in the dataset. "
+        f"This was calculated by grouping all tickets by the `Caller` column "
+        f"and counting how many times each person appeared."
+    )
+
+    return f"**Answer:** {name_str}\n\n**Explanation:** {explanation}"
+
+
+# ===================================================
+# SPECIAL CASE: HANDLER SPEED (SLOWEST / FASTEST)
+# ===================================================
+
+def answer_handler_speed(df: pd.DataFrame, mode: str = "slowest") -> str:
+
+    time_col = "Resolution_Time_Seconds"
+    if time_col not in df.columns:
+        return "**Answer:** I don't know.\n\n**Explanation:** Missing column `Resolution_Time_Seconds`."
+
+    handler_col = None
+    if "Created_By" in df.columns:
+        handler_col = "Created_By"
+    elif "Updated_By" in df.columns:
+        handler_col = "Updated_By"
+
+    if handler_col is None:
+        return "**Answer:** I don't know.\n\n**Explanation:** No handler column found."
+
+    sub = df.dropna(subset=[handler_col, time_col]).copy()
+    sub[time_col] = pd.to_numeric(sub[time_col], errors="coerce")
+    sub = sub.dropna(subset=[time_col])
+
+    if sub.empty:
+        return "**Answer:** I don't know.\n\n**Explanation:** No valid resolution times."
+
+    grouped = sub.groupby(handler_col)[time_col].mean()
+
+    if mode == "slowest":
+        best = grouped.idxmax()
+        avg_time = grouped.max()
+        label = "slowest"
+    else:
+        best = grouped.idxmin()
+        avg_time = grouped.min()
+        label = "fastest"
+
+    pretty_time = format_seconds(avg_time)
+
+    explanation = (
+        f"{best} has the **{label} average resolution time**, "
+        f"taking about **{pretty_time}** per ticket on average. "
+        f"This was calculated using the `{time_col}` column grouped by `{handler_col}`."
+    )
+
+    return f"**Answer:** {best}\n\n**Explanation:** {explanation}"
+
+
+# ===================================================
+# LLM CODE GENERATION FOR GENERAL QUESTIONS
 # ===================================================
 
 PYTHON_INSTRUCTIONS = """
 You are a Python data analyst for myBasePay.
 
-You will receive:
-- A Pandas DataFrame called `df`
-- A natural language question
-- Column definitions and clarifications
-
-You MUST generate **Python code only** that:
-1. Computes the correct answer logically.
-2. Assigns the final value to a variable named `result`.
-3. Does NOT print anything.
-4. Does NOT import anything.
-5. Does NOT rely on external libraries.
-6. NEVER writes explanations — ONLY Python code.
-
-IMPORTANT COLUMN LOGIC:
-- The person **submitting** the ticket is ALWAYS `Caller`.
-- The person **handling** or **working on** the ticket is `Created_By` or `Updated_By`.
-- Resolution time is `Resolution_Time_Seconds`.
-- Use `df` exactly as provided.
-
-After computing the result value in Python, assign:
-    result = {your computed variable}
-
-If the answer cannot be determined, set:
-    result = "I don't know"
+You must generate ONLY Python code (no explanation) that:
+- Uses the Pandas DataFrame `df`
+- Computes an answer to the user's question
+- Assigns the answer to a variable named `result`
+- Does not import anything
+- Does not print anything
+- Does not write explanations
 """
 
-
-# ===================================================
-# GENERATE PYTHON CODE
-# ===================================================
-
 def generate_code(df: pd.DataFrame, question: str, system_text: str) -> str:
+
     prompt = f"""
 {PYTHON_INSTRUCTIONS}
 
@@ -101,26 +203,16 @@ DataFrame columns:
 User question:
 {question}
 
-Write ONLY Python code that uses Pandas to calculate the answer.
-Store the final answer in `result`. No explanation.
+Write only Python code that calculates the correct result.
+Store the final answer in the variable `result`.
 """
 
     code = llm.invoke(prompt).content.strip()
-
-    # Remove code fences if they appear
     code = code.replace("```python", "").replace("```", "").strip()
-
     return code
 
 
-# ===================================================
-# EXECUTE PYTHON CODE SAFELY
-# ===================================================
-
 def execute_code(df: pd.DataFrame, code: str):
-    """
-    Safe local execution of generated Python code with df in scope.
-    """
     local_vars = {"df": df, "result": None}
 
     try:
@@ -130,66 +222,53 @@ def execute_code(df: pd.DataFrame, code: str):
         return f"Error executing code: {e}"
 
 
-# ===================================================
-# EXPLANATION LAYER (NEW!)
-# ===================================================
+def explain_answer(question: str, result, system_text: str):
 
-def explain_answer(question: str, result, df: pd.DataFrame, system_text: str):
-    """
-    Takes the computed result and generates a concise explanation.
-    """
-
-    explanation_prompt = f"""
-You are an analytics assistant.
-
-You will receive:
-- A user's question
-- The computed answer (Python result)
-- The dataset column meanings
-
-Your task:
-- Provide a **short, executive-style explanation**.
-- Reference the specific columns used.
-- Explain how the answer was computed.
-- Include numeric details (averages, counts, seconds, etc.) if relevant.
-- Be concise and clear.
-- DO NOT hallucinate data that is not in the result.
-
+    prompt = f"""
 User question:
 {question}
 
-Computed Python result:
+Computed result:
 {result}
+
+Explain the result in 1–3 sentences, concise and clear.
+Do NOT hallucinate — rely solely on the provided result and column meanings.
 
 Column meanings:
 {system_text}
-
-Write a concise explanation:
 """
 
-    explanation = llm.invoke(explanation_prompt).content.strip()
-    return explanation
+    return llm.invoke(prompt).content.strip()
 
 
 # ===================================================
-# PUBLIC ASK FUNCTION (USED BY STREAMLIT)
+# MASTER ASK FUNCTION
 # ===================================================
 
 def ask_question(agent_unused, question: str, system_text: str, df=None):
     if df is None:
         return "Dataset not loaded."
 
-    generated_code = generate_code(df, question, system_text)
-    result = execute_code(df, generated_code)
-    explanation = explain_answer(question, result, df, system_text)
+    q = question.lower().strip()
 
-    final_output = f"**Answer:** {result}\n\n**Explanation:** {explanation}"
-    return final_output
+    # Special-case: who submits the most tickets / who called in most
+    if ("submit" in q or "called in" in q or "call in" in q or "caller" in q) and "most" in q:
+        return answer_who_submits_most(df)
 
+    # Special-case: handler speeds
+    if "handle" in q or "handles" in q or "handling" in q:
+        if "slowest" in q or "longest" in q:
+            return answer_handler_speed(df, "slowest")
+        if "fastest" in q or "quickest" in q or "shortest" in q:
+            return answer_handler_speed(df, "fastest")
 
-# ===================================================
-# STUB FOR STREAMLIT — NO REAL AGENT NEEDED
-# ===================================================
+    # Generic LLM flow
+    code = generate_code(df, question, system_text)
+    result = execute_code(df, code)
+    explanation = explain_answer(question, result, system_text)
+
+    return f"**Answer:** {result}\n\n**Explanation:** {explanation}"
+
 
 def build_agent(df, system_text):
     return df
