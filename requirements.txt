@@ -1,0 +1,10 @@
+streamlit
+pandas
+openpyxl
+
+langchain
+langchain-community
+langchain-openai
+langchain-experimental
+tiktoken
+python-dotenv
