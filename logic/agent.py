@@ -75,7 +75,7 @@ def load_excel(
 
 
 # ==========================================
-# BUILD AGENT — ***UPDATED FIXED VERSION***
+# BUILD AGENT — ZERO-LOOP, STABLE VERSION
 # ==========================================
 
 def build_agent(
@@ -84,17 +84,15 @@ def build_agent(
     model_name: str = "gpt-4o-mini",
 ):
     """
-    Build a safe, single-step Pandas agent.
+    Build a stable Pandas agent.
 
-    FIXES INCLUDED:
-      - Converts datetime columns to strings (prevents tokenizer crashes)
-      - Uses safe agent mode (no iterative looping)
-      - Sets max_iterations=1 to prevent infinite cycles
-      - early_stopping_method="generate" ensures the LLM stops instead of looping
-      - allow_dangerous_code=True enables real Pandas calculations
+    FIXES:
+      - Converts datetime columns to strings (avoids LC serialization errors)
+      - No max_iterations or early_stopping (keeps it version-proof)
+      - Simple, direct Pandas execution (no looping)
     """
 
-    # Convert datetime columns to string
+    # Convert datetime columns to string to avoid LangChain crashes
     df = df.copy()
     datetime_cols = df.select_dtypes(
         include=["datetime64[ns]", "datetime", "datetimetz"]
@@ -106,15 +104,13 @@ def build_agent(
     # Initialize LLM
     llm = ChatOpenAI(model=model_name, temperature=0)
 
-    # Create the Pandas agent (loop-free mode)
+    # Create stable Pandas agent
     agent = create_pandas_dataframe_agent(
         llm,
         df,
         verbose=False,
-        allow_dangerous_code=True,
-        handle_parsing_errors=True,
-        max_iterations=1,                # <-- prevents iteration-limit errors
-        early_stopping_method="generate" # <-- forces an answer instead of looping
+        allow_dangerous_code=True,      # required for real calculations
+        handle_parsing_errors=True,     # avoid crashes on invalid code
     )
 
     return agent
@@ -142,7 +138,7 @@ def ask_question(agent, question: str, system_text: str) -> str:
         "- Use ONLY the information in the DataFrame.\n"
         "- Perform real calculations using Pandas.\n"
         "- Do NOT guess or hallucinate values.\n"
-        "- If the answer cannot be found, respond exactly: 'I don't know'.\n\n"
+        "- If the answer cannot be determined, respond exactly: 'I don't know'.\n\n"
         f"User question: {question}"
     )
 
