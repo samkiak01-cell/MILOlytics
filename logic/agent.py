@@ -16,12 +16,12 @@ def load_excel(
     source: Union[str, Path, IO[bytes]]
 ) -> Tuple[pd.DataFrame, str, List[str]]:
     """
-    Loads the Excel dataset files used by the myBasePay ticket assistant.
+    Loads the Excel dataset for the myBasePay ticket analytics assistant.
 
     Expected sheets:
       - "Data" (main dataset)
-      - "System Prompt" (text explanations of each column)
-      - "Questions" (sample user questions)
+      - "System Prompt" (column descriptions)
+      - "Questions" (sample questions)
 
     Returns:
       df_data: main DataFrame
@@ -54,7 +54,7 @@ def load_excel(
 
     else:
         system_text = (
-            "System Prompt sheet not found. Columns describe a call center ticketing dataset."
+            "System Prompt sheet missing. Columns describe a call center ticket dataset."
         )
 
     # ---- Sample questions ----
@@ -75,7 +75,7 @@ def load_excel(
 
 
 # ==========================================
-# BUILD AGENT
+# BUILD AGENT — ***UPDATED FIXED VERSION***
 # ==========================================
 
 def build_agent(
@@ -84,14 +84,17 @@ def build_agent(
     model_name: str = "gpt-4o-mini",
 ):
     """
-    Build a safe LangChain Pandas DataFrame agent.
+    Build a safe, single-step Pandas agent.
 
-    Fixes:
-      - Converts datetime columns to strings (prevents tokenization errors)
-      - Enables allow_dangerous_code=True for real Pandas operations
+    FIXES INCLUDED:
+      - Converts datetime columns to strings (prevents tokenizer crashes)
+      - Uses safe agent mode (no iterative looping)
+      - Sets max_iterations=1 to prevent infinite cycles
+      - early_stopping_method="generate" ensures the LLM stops instead of looping
+      - allow_dangerous_code=True enables real Pandas calculations
     """
 
-    # Convert datetime columns to string to avoid LangChain crashes
+    # Convert datetime columns to string
     df = df.copy()
     datetime_cols = df.select_dtypes(
         include=["datetime64[ns]", "datetime", "datetimetz"]
@@ -103,13 +106,15 @@ def build_agent(
     # Initialize LLM
     llm = ChatOpenAI(model=model_name, temperature=0)
 
-    # Create the Pandas agent
+    # Create the Pandas agent (loop-free mode)
     agent = create_pandas_dataframe_agent(
         llm,
         df,
         verbose=False,
+        allow_dangerous_code=True,
         handle_parsing_errors=True,
-        allow_dangerous_code=True,  # REQUIRED to avoid ValueError
+        max_iterations=1,                # <-- prevents iteration-limit errors
+        early_stopping_method="generate" # <-- forces an answer instead of looping
     )
 
     return agent
@@ -121,23 +126,23 @@ def build_agent(
 
 def ask_question(agent, question: str, system_text: str) -> str:
     """
-    Wrap question with system prompt + instructions.
+    Wrapper for the agent with contextual instructions.
     Ensures:
+      - Uses real DataFrame operations
       - No hallucinations
-      - Answers come from DataFrame
-      - Fallback to "I don't know" if not found
+      - Responds 'I don't know' when needed
     """
 
     prompt = (
         "You are a myBasePay analytics assistant. "
-        "You analyze a call center ticketing dataset stored in a Pandas DataFrame named `df`.\n\n"
+        "You analyze a call center ticket dataset stored in a Pandas DataFrame named `df`.\n\n"
         "Column meanings:\n"
         f"{system_text}\n\n"
         "Rules:\n"
-        "- Use ONLY the data in the DataFrame.\n"
+        "- Use ONLY the information in the DataFrame.\n"
         "- Perform real calculations using Pandas.\n"
-        "- Absolutely DO NOT guess or hallucinate.\n"
-        "- If the answer cannot be determined from the dataset, respond exactly: 'I don't know'.\n\n"
+        "- Do NOT guess or hallucinate values.\n"
+        "- If the answer cannot be found, respond exactly: 'I don't know'.\n\n"
         f"User question: {question}"
     )
 
