@@ -7,21 +7,28 @@ from langchain_openai import ChatOpenAI
 
 
 # ===================================================
-# LOAD EXCEL
+# LOAD EXCEL (same contract as before)
 # ===================================================
 
 def load_excel(
     source: Union[str, Path, IO[bytes]]
 ) -> Tuple[pd.DataFrame, str, List[str]]:
+    """
+    Load the Excel file and return:
+      - df: main ticket dataset from 'Data' sheet
+      - system_text: text from 'System Prompt' (if present)
+      - sample_questions: from 'Questions' sheet (if present)
+    """
 
     xls = pd.ExcelFile(source)
     sheets = xls.sheet_names
 
     if "Data" not in sheets:
-        raise ValueError("Excel must contain sheet 'Data'.")
+        raise ValueError("Excel must contain a sheet named 'Data'.")
 
     df = pd.read_excel(xls, "Data")
 
+    # System Prompt sheet
     if "System Prompt" in sheets:
         df_sys = pd.read_excel(xls, "System Prompt")
         col = df_sys.columns[0]
@@ -29,151 +36,203 @@ def load_excel(
     else:
         system_text = ""
 
+    # Questions sheet
     if "Questions" in sheets:
         df_q = pd.read_excel(xls, "Questions")
         col = df_q.columns[0]
-        questions = df_q[col].dropna().astype(str).tolist()
+        sample_questions = df_q[col].dropna().astype(str).tolist()
     else:
-        questions = []
+        sample_questions = []
 
-    return df, system_text, questions
+    return df, system_text, sample_questions
 
 
 # ===================================================
-# MODEL
+# LLM
 # ===================================================
 
 llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
 
 
 # ===================================================
-# CODE GENERATION — UPDATED SPEC
+# COLUMN SEMANTICS (from your description)
+# ===================================================
+
+COLUMN_SEMANTICS = """
+We have a call center and each person logs issues they get from calls into Jira as support tickets.
+The exported dataset has these columns:
+
+- Ticket_Number: ID of the Jira ticket
+- Description: summary of the issue
+- Caller: person's name who called in with the issue (person submitting the ticket)
+- Priority: urgency level of the issue
+- Status: state of the ticket (resolved, in progress, newly submitted)
+- Support_Team: name of the group answering the calls and handling the ticket
+- Created_Date_Time: date & time the issue was received
+- Created_By: name of the call center team member who received the call and entered the ticket
+- Updated_Date_Time: date & time the ticket was last updated
+- Updated_By: name of the call center team member who last updated the ticket
+- Due_Date_Time: expected date & time the ticket should be resolved to meet the SLA
+- Resolution_Date_Time: date & time the issue was resolved
+- Resolved_By: name of the call center team member who resolved the issue
+- Resolution_Time_Seconds: time in seconds between Created_Date_Time and Resolution_Date_Time
+
+Very important interpretation rules:
+- "Who submits the most tickets?" or "who called in the most?" -> use the Caller column.
+- "Which call center member handles/resolves tickets fastest/slowest?" -> use Resolution_Time_Seconds grouped by Created_By or Resolved_By.
+- SLA questions -> compare Resolution_Date_Time (or Resolution_Time_Seconds) with Due_Date_Time.
+"""
+
+
+# ===================================================
+# CODE GENERATION PROMPT
 # ===================================================
 
 CODE_PROMPT = """
 You are a senior Python data analyst.
 
 You MUST output ONLY Python code that uses the Pandas DataFrame `df`
-to compute the answer to the user's question.
+to answer the user's question.
 
-VERY IMPORTANT:
-You MUST return the answer as a structured Python object (dict or list of dicts)
-that contains BOTH:
-- the identifier(s)
-- all relevant numeric values used in the comparison
+The DataFrame is named `df` and has the columns described below.
+You should use these semantics correctly (e.g., Caller submits, Created_By/Resolved_By handle).
 
-Examples of valid outputs:
-result = {"ticket": "INC001234", "duration_seconds": 14820}
-result = [{"caller": "John", "count": 5}, {"caller": "Mary", "count": 5}]
+Your job:
+1. Analyze the question and decide what needs to be computed.
+2. Use Pandas operations on `df` to compute the answer.
+3. Construct a Python dict named `result` with EXACTLY TWO keys:
+   - "answer": a short, human-readable answer string
+   - "explanation": 1–2 concise sentences that briefly explain WHY that is the answer,
+                   including key numbers (e.g., how many tickets, how many seconds, etc.)
 
-DO NOT return a single string unless the question truly requires it.
+Examples of valid `result` values:
 
-Rules:
-- The DataFrame variable available is df
-- NEVER print anything
-- NEVER import anything
-- NEVER use visualization
-- You MUST assign your final answer into a variable named result
-- DO NOT write explanations
-- DO NOT write markdown
-- ONLY Python code
+result = {
+    "answer": "INC0010109",
+    "explanation": "Ticket INC0010109 took 259200 seconds (72 hours) to resolve, the longest in the dataset."
+}
 
-If the answer cannot be computed:
-    result = {"error": "I don't know"}
+result = {
+    "answer": "Abraham Lincoln and Olivia Johnson",
+    "explanation": "Abraham Lincoln and Olivia Johnson each called in 3 times, the highest number of tickets submitted by any caller."
+}
+
+result = {
+    "answer": "Overall SLA compliance is 87.5%",
+    "explanation": "70 out of 80 tickets were resolved on or before their due date, giving 87.5% of tickets within SLA."
+}
+
+Formatting and style rules:
+- Keep `answer` short and direct (names, ticket numbers, a percentage, etc.).
+- Keep `explanation` to 1–2 sentences max. No long paragraphs.
+- Include the key numeric values used in the calculation (counts, percentages, seconds/hours).
+- Do NOT print anything.
+- Do NOT import anything.
+- Do NOT create plots.
+- Do NOT write markdown.
+- Do NOT write comments.
+- Only executable Python code that ends with defining the `result` dict.
+
+If the answer truly cannot be determined from the available columns, set:
+result = {
+    "answer": "I don't know",
+    "explanation": "Explain briefly why the answer cannot be determined from this dataset."
+}
 """
 
 
 def generate_code(question: str, df: pd.DataFrame, system_text: str) -> str:
+    """
+    Ask the LLM to write Python code that:
+    - Uses df
+    - Computes an answer
+    - Builds `result = {"answer": ..., "explanation": ...}`
+    """
+
+    cols = list(df.columns)
 
     prompt = f"""
 {CODE_PROMPT}
 
-Column descriptions:
+Column descriptions from the file (if any):
 {system_text}
 
+Additional semantics:
+{COLUMN_SEMANTICS}
+
 DataFrame columns:
-{list(df.columns)}
+{cols}
 
 User question:
 {question}
 
-Write only Python code. No backticks.
+Write ONLY Python code. No backticks, no markdown, no comments.
 """
 
     code = llm.invoke(prompt).content.strip()
-    return code.replace("```", "").replace("python", "").strip()
+    # Clean possible fences just in case
+    code = code.replace("```python", "").replace("```", "").strip()
+    return code
 
 
 # ===================================================
-# EXECUTE
+# EXECUTE GENERATED CODE
 # ===================================================
 
 def execute_code(df: pd.DataFrame, code: str) -> Any:
-    scope = {"df": df.copy(), "result": None}
+    """
+    Execute the generated Python code with df in scope.
+    Expect a dict named `result` at the end.
+    """
+    local_scope: dict[str, Any] = {"df": df.copy(), "result": None}
     try:
-        exec(code, {}, scope)
-        return scope["result"]
+        exec(code, {}, local_scope)
+        return local_scope.get("result", None)
     except Exception as e:
-        return {"error": f"Execution error: {e}"}
+        # If execution fails, wrap the error as a structured result
+        return {
+            "answer": "I don't know",
+            "explanation": f"Error executing generated code: {e}"
+        }
 
 
 # ===================================================
-# EXPLANATION — SHORT + FACTUAL
+# MAIN ENTRYPOINT FOR STREAMLIT
 # ===================================================
 
-EXPLANATION_PROMPT = """
-You are a data analyst.
+def ask_question(agent_unused, question: str, system_text: str, df=None) -> str:
+    """
+    Main function used by the app.
+    Returns a formatted string:
 
-You will be given:
-- The user's question
-- A structured Python result (dict or list of dicts)
-- Column meanings
+    Answer:
+    <answer>
 
-Your task:
-Write a SHORT, clean explanation (1–2 sentences MAX).
-Use ONLY the numbers and values found in the result.
-Never guess. Never write fluff. Never add unrelated commentary.
-
-Format should ALWAYS be:
-"<identifier> had <value> <metric> ..."
-
-User question:
-{question}
-
-Result:
-{result}
-
-Column meanings:
-{system_text}
-
-Write a concise factual explanation:
-"""
-
-
-def explain_result(question: str, result: Any, system_text: str) -> str:
-    prompt = EXPLANATION_PROMPT.format(
-        question=question,
-        result=str(result),
-        system_text=system_text,
-    )
-    return llm.invoke(prompt).content.strip()
-
-
-# ===================================================
-# MAIN API
-# ===================================================
-
-def ask_question(agent_unused, question: str, system_text: str, df=None):
-
+    Explanation:
+    <explanation>
+    """
     if df is None:
         return "Dataset not loaded."
 
     code = generate_code(question, df, system_text)
     result = execute_code(df, code)
-    explanation = explain_result(question, result, system_text)
 
-    return f"**Answer:** {result}\n\n**Explanation:** {explanation}"
+    # Defensive fallback handling
+    if not isinstance(result, dict):
+        answer_text = str(result)
+        explanation_text = "This answer was computed from the dataset, but no structured explanation was provided."
+    else:
+        answer_text = str(result.get("answer", "I don't know"))
+        explanation_text = str(result.get("explanation", "")).strip()
+        if not explanation_text:
+            explanation_text = "This answer was computed from the dataset, but no detailed explanation was provided."
+
+    return f"Answer:\n{answer_text}\n\nExplanation:\n{explanation_text}"
 
 
 def build_agent(df, system_text):
+    """
+    Kept for compatibility with the existing app structure.
+    We don't need a complex agent object; df itself is enough.
+    """
     return df
