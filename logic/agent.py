@@ -2,10 +2,8 @@
 
 from pathlib import Path
 from typing import Tuple, List, Union, IO
-
 import pandas as pd
 from langchain_openai import ChatOpenAI
-from langchain_experimental.agents import create_pandas_dataframe_agent
 
 
 # ==========================================
@@ -15,132 +13,120 @@ from langchain_experimental.agents import create_pandas_dataframe_agent
 def load_excel(
     source: Union[str, Path, IO[bytes]]
 ) -> Tuple[pd.DataFrame, str, List[str]]:
-    """
-    Loads the Excel dataset for the myBasePay ticket analytics assistant.
-
-    Expected sheets:
-      - "Data" (main dataset)
-      - "System Prompt" (column descriptions)
-      - "Questions" (sample questions)
-
-    Returns:
-      df_data: main DataFrame
-      system_text: combined descriptive text
-      sample_questions: list of sample questions
-    """
 
     xls = pd.ExcelFile(source)
     sheet_names = xls.sheet_names
 
-    # ---- Main dataset ----
     if "Data" not in sheet_names:
-        raise ValueError("Excel must contain a sheet named 'Data'.")
+        raise ValueError("Excel must contain a sheet called 'Data'.")
 
     df_data = pd.read_excel(xls, "Data")
 
-    # ---- System prompt ----
+    # Load system prompt explanation
     system_text = ""
     if "System Prompt" in sheet_names:
         df_system = pd.read_excel(xls, "System Prompt")
-        first_col = df_system.columns[0]
-
-        system_lines = (
-            df_system[first_col]
-            .dropna()
-            .astype(str)
-            .tolist()
+        col = df_system.columns[0]
+        system_text = "\n".join(
+            df_system[col].dropna().astype(str).tolist()
         )
-        system_text = "\n".join(system_lines)
-
     else:
-        system_text = (
-            "System Prompt sheet missing. Columns describe a call center ticket dataset."
-        )
+        system_text = "Dataset describing myBasePay call center tickets."
 
-    # ---- Sample questions ----
-    sample_questions: List[str] = []
-
+    # Load sample questions
+    sample_questions = []
     if "Questions" in sheet_names:
         df_questions = pd.read_excel(xls, "Questions")
-        first_col = df_questions.columns[0]
-
-        sample_questions = (
-            df_questions[first_col]
-            .dropna()
-            .astype(str)
-            .tolist()
-        )
+        col = df_questions.columns[0]
+        sample_questions = df_questions[col].dropna().astype(str).tolist()
 
     return df_data, system_text, sample_questions
 
 
 # ==========================================
-# BUILD AGENT — ZERO-LOOP, STABLE VERSION
+# ZERO-AGENT EXECUTION SYSTEM
 # ==========================================
 
-def build_agent(
-    df: pd.DataFrame,
-    system_text: str,
-    model_name: str = "gpt-4o-mini",
-):
+llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
+
+
+PYTHON_INSTRUCTIONS = """
+You are a Python data analyst.
+
+You will be given:
+- A Pandas DataFrame called df
+- A natural language question
+
+Your job is to write **ONLY Python code**, no explanation.
+The code MUST assign the final answer to a variable named `result`.
+
+Rules:
+- Use only df and Pandas.
+- Do not print anything.
+- Do not import anything.
+- Do not loop infinitely.
+- Always assign the final computed answer to `result`.
+- If the answer cannot be determined, set: result = "I don't know"
+"""
+
+
+def generate_code(df: pd.DataFrame, question: str, system_text: str) -> str:
     """
-    Build a stable Pandas agent.
-
-    FIXES:
-      - Converts datetime columns to strings (avoids LC serialization errors)
-      - No max_iterations or early_stopping (keeps it version-proof)
-      - Simple, direct Pandas execution (no looping)
-    """
-
-    # Convert datetime columns to string to avoid LangChain crashes
-    df = df.copy()
-    datetime_cols = df.select_dtypes(
-        include=["datetime64[ns]", "datetime", "datetimetz"]
-    ).columns
-
-    for col in datetime_cols:
-        df[col] = df[col].astype(str)
-
-    # Initialize LLM
-    llm = ChatOpenAI(model=model_name, temperature=0)
-
-    # Create stable Pandas agent
-    agent = create_pandas_dataframe_agent(
-        llm,
-        df,
-        verbose=False,
-        allow_dangerous_code=True,      # required for real calculations
-        handle_parsing_errors=True,     # avoid crashes on invalid code
-    )
-
-    return agent
-
-
-# ==========================================
-# ASK QUESTION
-# ==========================================
-
-def ask_question(agent, question: str, system_text: str) -> str:
-    """
-    Wrapper for the agent with contextual instructions.
-    Ensures:
-      - Uses real DataFrame operations
-      - No hallucinations
-      - Responds 'I don't know' when needed
+    LLM generates Python code to answer the question using df.
     """
 
-    prompt = (
-        "You are a myBasePay analytics assistant. "
-        "You analyze a call center ticket dataset stored in a Pandas DataFrame named `df`.\n\n"
-        "Column meanings:\n"
-        f"{system_text}\n\n"
-        "Rules:\n"
-        "- Use ONLY the information in the DataFrame.\n"
-        "- Perform real calculations using Pandas.\n"
-        "- Do NOT guess or hallucinate values.\n"
-        "- If the answer cannot be determined, respond exactly: 'I don't know'.\n\n"
-        f"User question: {question}"
-    )
+    prompt = f"""
+{PYTHON_INSTRUCTIONS}
 
-    result = agent.run(prompt)
-    return result
+Column meanings:
+{system_text}
+
+DataFrame columns:
+{list(df.columns)}
+
+Question:
+{question}
+
+Write Python code that computes the answer and stores it in `result`.
+"""
+
+    code = llm.invoke(prompt).content.strip()
+
+    # Remove code fencing if present
+    code = code.replace("```python", "").replace("```", "").strip()
+
+    return code
+
+
+def execute_code(df: pd.DataFrame, code: str):
+    """
+    Executes model-generated Python safely with df in scope.
+    """
+
+    local_vars = {"df": df, "result": None}
+
+    try:
+        exec(code, {}, local_vars)
+        return local_vars.get("result", "I don't know")
+    except Exception as e:
+        return f"Error executing code: {e}"
+
+
+def ask_question(agent_unused, question: str, system_text: str, df=None) -> str:
+    """
+    Agent wrapper for Streamlit (agent param kept for compatibility).
+    """
+
+    if df is None:
+        return "Dataset not loaded."
+
+    generated = generate_code(df, question, system_text)
+    answer = execute_code(df, generated)
+    return answer
+
+
+def build_agent(df, system_text):
+    """
+    No agent needed. Just return df since ask_question() now handles execution.
+    """
+    return df
