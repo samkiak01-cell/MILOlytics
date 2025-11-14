@@ -25,37 +25,44 @@ st.set_page_config(
 st.markdown(
     """
 <style>
+
 :root {
     --mbp-navy: #020617;
-    --mbp-navy-softer: #030712;
-    --mbp-navy-soft: #020617;
     --mbp-cyan: #2BB3C0;
-    --mbp-cyan-soft: rgba(43, 179, 192, 0.35);
     --mbp-text: #F9FAFB;
     --mbp-subtext: #9CA3AF;
 }
 
-/* Overall page background & text */
+/* Overall page background */
 .block-container {
     background: radial-gradient(circle at top left, #0b1120, #020617 55%, #000000 100%);
     color: var(--mbp-text);
-    padding-top: 1.5rem;
+    padding-top: 4rem !important;  /* 🔥 MOVES TITLE DOWN BELOW TOP BAR */
 }
 
-/* Header text tweaks */
-h1, h2, h3, h4 {
-    color: var(--mbp-text);
-}
-
-/* Header badge */
+/* Header title */
 .mbp-header-title {
-    font-size: 1.9rem;
+    font-size: 2.2rem;
     font-weight: 700;
-    color: var(--mbp-text);
+    margin-bottom: 4px;
 }
 .mbp-header-sub {
-    font-size: 0.95rem;
+    font-size: 1rem;
     color: var(--mbp-subtext);
+}
+
+/* White oval logo container */
+.mbp-logo-wrapper {
+    background: white;
+    padding: 12px 22px;
+    border-radius: 40px;
+    display: inline-block;
+    box-shadow: 0px 5px 20px rgba(255, 255, 255, 0.12);
+}
+.mbp-logo-container {
+    display: flex;
+    justify-content: flex-end;
+    align-items: center;
 }
 
 /* Answer card */
@@ -78,12 +85,7 @@ h1, h2, h3, h4 {
     box-shadow: 0px 6px 18px rgba(0,0,0,0.35);
 }
 
-/* Strong labels inside stats */
-.stats-box strong {
-    color: var(--mbp-text);
-}
-
-/* Button styling */
+/* Buttons */
 .stButton>button {
     background: linear-gradient(135deg, var(--mbp-cyan), #06b6d4);
     color: #0f172a;
@@ -110,7 +112,7 @@ h1, h2, h3, h4 {
     color: var(--mbp-text);
 }
 
-/* Text input */
+/* Dark text input */
 .stTextInput>div>div>input {
     background-color: #020617;
     color: var(--mbp-text);
@@ -151,9 +153,16 @@ with header_left:
 with header_right:
     logo_path = Path("mybasepay_logo.png")
     if logo_path.exists():
-        st.image(str(logo_path), use_column_width=False)
-    else:
-        st.write("")  # silent if not present
+        st.markdown(
+            f"""
+            <div class="mbp-logo-container">
+                <div class="mbp-logo-wrapper">
+                    <img src="{logo_path.as_posix()}" width="120">
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
 
 st.markdown("---")
@@ -168,7 +177,7 @@ st.sidebar.header("Upload Dataset")
 uploaded_file = st.sidebar.file_uploader(
     "Choose a BlockData-style Excel file (.xlsx)",
     type=["xlsx"],
-    help="File should follow the BlockData structure with 'Data' sheet and expected columns.",
+    help="Must include 'Data' sheet and the expected column structure.",
 )
 
 default_path = Path("data/BlockData.xlsx")
@@ -192,24 +201,22 @@ if uploaded_file:
         data_loaded = True
         st.sidebar.success("Dataset loaded successfully.")
     except Exception as e:
-        st.sidebar.error(f"Error reading uploaded file: {e}")
+        st.sidebar.error(f"Error loading file: {e}")
+
 elif default_path.exists():
     try:
         df_data, system_text, sample_questions = load_source(None)
         data_loaded = True
-        st.sidebar.info("Using default dataset: data/BlockData.xlsx")
+        st.sidebar.info("Using default dataset: BlockData.xlsx")
     except Exception as e:
         st.sidebar.error(f"Error loading default dataset: {e}")
-else:
-    st.sidebar.warning("Upload a dataset to begin.")
 
 
 # =====================================================
-# Helper Functions for Stats
+# Helper Functions
 # =====================================================
 
 def human_time(seconds):
-    """Convert seconds to a human-friendly string."""
     if pd.isna(seconds):
         return "N/A"
     seconds = float(seconds)
@@ -221,25 +228,18 @@ def human_time(seconds):
 def compute_stats(df: pd.DataFrame):
     stats = {}
 
-    # Total tickets
     stats["total"] = len(df)
 
-    # SLA Stats
     if "Due_Date_Time" in df.columns and "Resolution_Date_Time" in df.columns:
         valid = df.dropna(subset=["Due_Date_Time", "Resolution_Date_Time"])
         if len(valid) > 0:
-            outside = (valid["Resolution_Date_Time"] > valid["Due_Date_Time"]).sum()
-            total = len(valid)
-            stats["sla_rate"] = 100 - (outside / total * 100)
-            stats["outside_sla"] = outside
+            late = (valid["Resolution_Date_Time"] > valid["Due_Date_Time"]).sum()
+            stats["sla_rate"] = 100 - (late / len(valid) * 100)
+            stats["outside_sla"] = late
         else:
             stats["sla_rate"] = None
             stats["outside_sla"] = None
-    else:
-        stats["sla_rate"] = None
-        stats["outside_sla"] = None
 
-    # Resolution Time Stats
     if "Resolution_Time_Seconds" in df.columns:
         rt = df["Resolution_Time_Seconds"].dropna()
         if len(rt) > 0:
@@ -250,33 +250,19 @@ def compute_stats(df: pd.DataFrame):
             stats["avg"] = "N/A"
             stats["min"] = "N/A"
             stats["max"] = "N/A"
-    else:
-        stats["avg"] = stats["min"] = stats["max"] = "N/A"
 
-    # Fastest / slowest agent (Resolved_By)
     if "Resolved_By" in df.columns and "Resolution_Time_Seconds" in df.columns:
-        df_res = df.dropna(subset=["Resolved_By", "Resolution_Time_Seconds"])
-        if len(df_res) > 0:
-            grouped = df_res.groupby("Resolved_By")["Resolution_Time_Seconds"].mean()
+        df2 = df.dropna(subset=["Resolved_By", "Resolution_Time_Seconds"])
+        if len(df2) > 0:
+            grouped = df2.groupby("Resolved_By")["Resolution_Time_Seconds"].mean()
             if len(grouped) > 0:
-                fastest = grouped.sort_values().head(1)
-                slowest = grouped.sort_values().tail(1)
-                stats["fastest_agent"] = (
-                    f"{fastest.index[0]} ({human_time(fastest.values[0])})"
-                )
-                stats["slowest_agent"] = (
-                    f"{slowest.index[0]} ({human_time(slowest.values[0])})"
-                )
+                fast = grouped.sort_values().head(1)
+                slow = grouped.sort_values().tail(1)
+                stats["fastest_agent"] = f"{fast.index[0]} ({human_time(fast.values[0])})"
+                stats["slowest_agent"] = f"{slow.index[0]} ({human_time(slow.values[0])})"
             else:
                 stats["fastest_agent"] = "N/A"
                 stats["slowest_agent"] = "N/A"
-        else:
-            stats["fastest_agent"] = "N/A"
-            stats["slowest_agent"] = "N/A"
-    else:
-        stats["fastest_agent"] = "N/A"
-        stats["slowest_agent"] = "N/A"
-
     return stats
 
 
@@ -288,64 +274,55 @@ if data_loaded and df_data is not None:
 
     left_col, right_col = st.columns([2.7, 1.3])
 
-    # ------------------------------
-    # LEFT — Question + Answer
-    # ------------------------------
+    # LEFT SIDE — Ask Question
     with left_col:
+
         st.subheader("Ask MILOlytics a Question")
 
-        user_question = st.text_input(
+        user_q = st.text_input(
             "Your Question",
             placeholder="Example: Which ticket took the longest to resolve?",
         )
 
         if st.button("Submit Question"):
-            if not user_question.strip():
+            if not user_q.strip():
                 st.error("Please enter a question.")
             else:
                 with st.spinner("Analyzing dataset..."):
-                    try:
-                        agent = build_agent(df_data, system_text)
-                        answer = ask_question(agent, user_question, system_text, df_data)
+                    agent = build_agent(df_data, system_text)
+                    answer = ask_question(agent, user_q, system_text, df_data)
 
-                        st.markdown("<div class='answer-box'>", unsafe_allow_html=True)
-                        st.markdown(answer)
-                        st.markdown("</div>", unsafe_allow_html=True)
+                st.markdown("<div class='answer-box'>", unsafe_allow_html=True)
+                st.markdown(answer)
+                st.markdown("</div>", unsafe_allow_html=True)
 
-                    except Exception as e:
-                        st.error(f"An error occurred: {e}")
-
-    # ------------------------------
-    # RIGHT — Stats Panel
-    # ------------------------------
+    # RIGHT SIDE — Stats Panel
     with right_col:
-        st.subheader("📊 Quick Statistics")
+
+        st.subheader("📊 Quick Stats")
 
         stats = compute_stats(df_data)
 
-        # Total tickets
         st.markdown("<div class='stats-box'>", unsafe_allow_html=True)
         st.markdown(f"**Total Tickets:** {stats['total']}")
         st.markdown("</div>", unsafe_allow_html=True)
 
-        # Resolution times
         st.markdown("<div class='stats-box'>", unsafe_allow_html=True)
-        st.markdown(f"**Average Resolution Time:** {stats['avg']}")
+        st.markdown(f"**Avg Resolution:** {stats['avg']}")
         st.markdown(f"**Fastest Ticket:** {stats['min']}")
         st.markdown(f"**Slowest Ticket:** {stats['max']}")
         st.markdown("</div>", unsafe_allow_html=True)
 
-        # Agents
         st.markdown("<div class='stats-box'>", unsafe_allow_html=True)
         st.markdown(f"**Fastest Agent:** {stats['fastest_agent']}")
         st.markdown(f"**Slowest Agent:** {stats['slowest_agent']}")
         st.markdown("</div>", unsafe_allow_html=True)
 
-        # SLA
-        if stats["sla_rate"] is not None:
+        if stats.get("sla_rate") is not None:
             st.markdown("<div class='stats-box'>", unsafe_allow_html=True)
             st.markdown(f"**SLA Compliance:** {stats['sla_rate']:.1f}%")
             st.markdown(f"**Outside SLA:** {stats['outside_sla']}")
             st.markdown("</div>", unsafe_allow_html=True)
+
 else:
     st.info("Upload a dataset using the sidebar to get started.")
