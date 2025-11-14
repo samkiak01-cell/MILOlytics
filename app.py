@@ -30,7 +30,7 @@ st.sidebar.header("Upload Your Dataset")
 uploaded_file = st.sidebar.file_uploader(
     "Upload your BlockData-style Excel file",
     type=["xlsx"],
-    help="Must include sheets: Data, System Prompt, Questions"
+    help="Must include same column headers."
 )
 
 default_path = Path("data/BlockData.xlsx")
@@ -63,7 +63,7 @@ elif default_path.exists():
     try:
         df_data, system_text, sample_questions = load_source(None)
         data_loaded = True
-        st.info("Using default dataset from /data/BlockData.xlsx")
+        st.info("Using BlockData.xlsx")
     except Exception as e:
         st.error(f"Error loading default dataset: {e}")
 
