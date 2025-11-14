@@ -1,267 +1,323 @@
+# logic/agent.py
+
+from pathlib import Path
+from typing import Tuple, List, Union, IO, Any
 import pandas as pd
 from langchain_openai import ChatOpenAI
-import json
-import numpy as np
-import re
 
 
+# ===================================================
+# LOAD EXCEL
+# ===================================================
 
-# ======================================================
-# Data Cleaning + Standardization
-# ======================================================
-
-def clean_dataframe(df):
-    """Ensures datetime, numeric, and name fields are standardized."""
-    datetime_cols = [
-        "Created_Date_Time",
-        "Updated_Date_Time",
-        "Due_Date_Time",
-        "Resolution_Date_Time",
-    ]
-
-    for col in datetime_cols:
-        if col in df.columns:
-            df[col] = pd.to_datetime(df[col], errors="coerce")
-
-    if "Resolution_Time_Seconds" in df.columns:
-        df["Resolution_Time_Seconds"] = pd.to_numeric(
-            df["Resolution_Time_Seconds"], errors="coerce"
-        )
-
-    name_cols = ["Caller", "Created_By", "Updated_By", "Resolved_By"]
-
-    for col in name_cols:
-        if col in df.columns:
-            df[col] = (
-                df[col]
-                  .astype(str)
-                  .str.strip()
-                  .replace({"nan": None, "None": None, "": None})
-            )
-
-    if "Description" in df.columns:
-        df["Description"] = df["Description"].astype(str).fillna("")
-
-    return df
-
-
-
-# ======================================================
-# Load Excel
-# ======================================================
-
-def load_excel(source):
-    """Load dataset + system text + sample questions."""
-    df_data = pd.read_excel(source, sheet_name=0)
-    system_text = str(pd.read_excel(source, sheet_name=1).iloc[0, 0])
-    df_questions = pd.read_excel(source, sheet_name=2)
-
-    df_data = clean_dataframe(df_data)
-    sample_questions = df_questions.iloc[:, 0].dropna().tolist()
-
-    return df_data, system_text, sample_questions
-
-
-
-# ======================================================
-# Chat model
-# ======================================================
-
-def build_agent(df, system_prompt):
-    llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
-    return {"llm": llm, "df": df, "system": system_prompt}
-
-
-
-# ======================================================
-# JSON extraction helpers (VERY IMPORTANT FIX)
-# ======================================================
-
-def extract_json(text):
+def load_excel(
+    source: Union[str, Path, IO[bytes]]
+) -> Tuple[pd.DataFrame, str, List[str]]:
     """
-    Extracts the FIRST valid JSON object from an LLM response,
-    even if extra text is around it.
+    Load the Excel file and return:
+      - df: main ticket dataset from 'Data' sheet
+      - system_text: text from 'System Prompt' (if present)
+      - sample_questions: from 'Questions' sheet (if present)
     """
 
-    # find the first {...} block
-    match = re.search(r"{.*}", text, flags=re.DOTALL)
-    if match:
-        json_str = match.group(0)
+    xls = pd.ExcelFile(source)
+    sheets = xls.sheet_names
 
-        try:
-            return json.loads(json_str)
-        except:
-            pass  # fallthrough to next fix attempt
+    if "Data" not in sheets:
+        raise ValueError("Excel must contain a sheet named 'Data'.")
 
-    # Try to repair JSON with GPT
-    return None
+    df = pd.read_excel(xls, "Data")
+
+    # System Prompt sheet
+    if "System Prompt" in sheets:
+        df_sys = pd.read_excel(xls, "System Prompt")
+        col = df_sys.columns[0]
+        system_text = "\n".join(df_sys[col].dropna().astype(str).tolist())
+    else:
+        system_text = ""
+
+    # Questions sheet
+    if "Questions" in sheets:
+        df_q = pd.read_excel(xls, "Questions")
+        col = df_q.columns[0]
+        sample_questions = df_q[col].dropna().astype(str).tolist()
+    else:
+        sample_questions = []
+
+    return df, system_text, sample_questions
 
 
+# ===================================================
+# LLM
+# ===================================================
 
-def repair_json_with_llm(llm, broken_text):
-    """Ask GPT to fix malformed JSON."""
-    fix_prompt = f"""
-Your job is to FIX the malformed JSON below and return VALID JSON only.
+llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
 
-Malformed JSON:
-{broken_text}
 
-Return ONLY valid JSON. Nothing else.
+# ===================================================
+# COLUMN SEMANTICS
+# ===================================================
+
+COLUMN_SEMANTICS = """
+We have a call center where agents log issues as Jira support tickets.
+
+Columns and meanings:
+- Ticket_Number: ID of the Jira ticket
+- Description: summary of the issue
+- Caller: person who called in and submitted the ticket
+- Priority: urgency level of the issue
+- Status: state of the ticket (resolved, in progress, newly submitted)
+- Support_Team: group that is handling the ticket
+- Created_Date_Time: timestamp when the ticket was created (issue received)
+- Created_By: call center team member who logged the ticket
+- Updated_Date_Time: timestamp when the ticket was last updated
+- Updated_By: call center team member who last updated the ticket
+- Due_Date_Time: SLA deadline when the ticket should be resolved
+- Resolution_Date_Time: timestamp when the issue was resolved
+- Resolved_By: call center team member who resolved the ticket
+- Resolution_Time_Seconds: number of seconds between Created_Date_Time and Resolution_Date_Time
+
+Important semantic rules:
+- "Who submits the most tickets?" or "who called in the most?" -> group by Caller.
+- "Which call center member handles/resolves tickets fastest/slowest?" -> group by Created_By or Resolved_By using Resolution_Time_Seconds.
+- SLA questions -> compare Resolution_Date_Time (or Resolution_Time_Seconds) with Due_Date_Time.
+- For questions about "outliers", "unusual", "anomalies", "stands out", treat these as items that are clearly at the extreme (top or bottom) compared to the rest.
 """
 
-    fixed = llm.invoke(fix_prompt).content
 
-    try:
-        match = re.search(r"{.*}", fixed, flags=re.DOTALL)
-        if match:
-            return json.loads(match.group(0))
-    except:
-        return None
+# ===================================================
+# CODE GENERATION PROMPT
+# ===================================================
 
-    return None
+CODE_PROMPT = """
+You are a senior Python data analyst.
 
+You MUST output ONLY Python code that uses the Pandas DataFrame `df`
+to answer the user's question about the ticket dataset.
 
+The DataFrame is named `df` and has the columns described below.
+Use the semantic rules correctly (Caller submits, Created_By/Resolved_By handle, SLA is based on Due_Date_Time vs Resolution).
 
-# ======================================================
-# MAIN ASK FUNCTION
-# ======================================================
+Your job:
+1. Analyze the question and decide what needs to be computed.
+2. Use Pandas operations on `df` to compute the answer.
+3. Construct a Python dict named result with at least these keys:
 
-def ask_question(agent, question, system_prompt, df):
-    df = clean_dataframe(df)
-    llm = agent["llm"]
+   result = {
+       "answer": <short human-readable answer string>,
+       "details": <structured data that includes any key values you used>,
+       "mode": <optional string describing the type of analysis, e.g. "max", "min", "outlier", "count", "trend">
+   }
 
-    # --------------------------------------------
-    # 1. LLM interpret question → JSON instructions
-    # --------------------------------------------
+   - result["answer"]:
+       * A concise string that directly answers the question.
+       * For multiple answers (ties), combine names in a human way,
+         e.g. "Abraham Lincoln and Olivia Johnson" or
+         "INC0010109, INC0010110 and INC0010200".
+   - result["details"]:
+       * A dict or list of dicts with the underlying numeric values.
+       * Always include numeric metrics you used (e.g. counts, seconds, percentages).
+       * Example for longest ticket:
+         {
+           "tickets": [
+               {"Ticket_Number": "INC0010109", "Resolution_Time_Seconds": 259200.0}
+           ]
+         }
+       * Example for callers:
+         {
+           "callers": [
+               {"Caller": "Abraham Lincoln", "count": 3},
+               {"Caller": "Olivia Johnson", "count": 3}
+           ],
+           "total_tickets": 40
+         }
+   - result["mode"]:
+       * A short tag like "max", "min", "outlier", "count", "share", "sla", etc.
+       * This helps the explanation reason about the type of answer.
 
-    interpretation_prompt = f"""
-You are an analytics interpreter.
+VERY IMPORTANT:
+- ALWAYS detect ties for max/min style questions.
+  If multiple tickets, callers, or agents share the same extreme value,
+  include ALL of them in result["answer"] and in result["details"].
+- For anomaly / unusual / outlier style questions:
+  * Consider items that are clearly at the top or bottom relative to others.
+  * Return the 1–3 most extreme items.
+  * Let the data distribution guide you; if several items are very similar,
+    it is fine to mention up to 3 of them.
+- DO NOT print anything.
+- DO NOT import anything.
+- DO NOT create plots.
+- DO NOT write comments.
+- Do NOT write explanations or text outside of Python code.
+- Only executable Python code that ends with a variable named result.
 
-Given the question:
-"{question}"
+If the answer cannot be computed from the available columns, set:
 
-And these columns:
-{list(df.columns)}
-
-Return ONLY a JSON dictionary with keys:
-- operation: one of ["max","min","average","count","groupby","top","bottom"]
-- column: column name to use
-- groupby: column name or null
-- filters: dict of filters or null
-- return_multiple: true/false
-- natural_language_goal: short description of desired final answer
-
-Respond with JSON ONLY.
+result = {
+    "answer": "I don't know",
+    "details": {"reason": "explain briefly why this cannot be computed"},
+    "mode": "error"
+}
 """
 
-    raw_response = llm.invoke(interpretation_prompt).content
 
-    # Try extracting JSON
-    parsed_json = extract_json(raw_response)
+def generate_code(question: str, df: pd.DataFrame, system_text: str) -> str:
+    """
+    Ask the LLM to write Python code that:
+    - Uses df
+    - Computes an answer
+    - Builds result = {"answer": ..., "details": ..., "mode": ...}
+    """
 
-    if parsed_json is None:
-        parsed_json = repair_json_with_llm(llm, raw_response)
+    cols = list(df.columns)
 
-    if parsed_json is None:
-        return "I couldn't interpret your request due to invalid JSON."
+    prompt = f"""
+{CODE_PROMPT}
 
-    # Extract fields safely
-    operation = parsed_json.get("operation")
-    col = parsed_json.get("column")
-    group = parsed_json.get("groupby")
-    filters = parsed_json.get("filters")
-    nl_goal = parsed_json.get("natural_language_goal", "")
-    multi = parsed_json.get("return_multiple", False)
+Column descriptions from the file (if any):
+{system_text}
 
-    # --------------------------------------------
-    # 2. Apply filters
-    # --------------------------------------------
+Additional semantics:
+{COLUMN_SEMANTICS}
 
-    working = df.copy()
+DataFrame columns:
+{cols}
 
-    if isinstance(filters, dict):
-        for k, v in filters.items():
-            if k in working.columns:
-                working = working[working[k] == v]
+User question:
+{question}
 
-    if working.empty:
-        return "No records matched that question."
+Write ONLY Python code. No backticks, no markdown, no comments.
+"""
 
-    # --------------------------------------------
-    # 3. Perform computation
-    # --------------------------------------------
+    code = llm.invoke(prompt).content.strip()
+    code = code.replace("```python", "").replace("```", "").strip()
+    return code
 
-    result = None
 
+# ===================================================
+# EXECUTE GENERATED CODE
+# ===================================================
+
+def execute_code(df: pd.DataFrame, code: str) -> Any:
+    """
+    Execute the generated Python code with df in scope.
+    Expect a dict named `result` at the end.
+    """
+    local_scope: dict[str, Any] = {"df": df.copy(), "result": None}
     try:
-        if group and group in working.columns and col in working.columns:
-            grouped = working.groupby(group)[col]
-
-            # numeric enforcement
-            try:
-                grouped_vals = grouped.mean()
-            except:
-                grouped_vals = grouped.apply(lambda x: x)
-
-            if operation == "max":
-                max_val = grouped_vals.max()
-                result = grouped_vals[grouped_vals == max_val]
-
-            elif operation == "min":
-                min_val = grouped_vals.min()
-                result = grouped_vals[grouped_vals == min_val]
-
-            else:
-                result = grouped_vals
-
-        elif col in working.columns:
-            series = working[col]
-
-            try:
-                series = pd.to_numeric(series, errors="coerce")
-            except:
-                pass
-
-            if operation == "max":
-                val = series.max()
-                result = working[working[col] == val]
-
-            elif operation == "min":
-                val = series.min()
-                result = working[working[col] == val]
-
-            elif operation == "average":
-                result = series.mean()
-
-            elif operation == "count":
-                result = len(series)
-
-            else:
-                result = series
-
+        exec(code, {}, local_scope)
+        return local_scope.get("result", None)
     except Exception as e:
-        return f"An error occurred performing the calculation: {e}"
+        return {
+            "answer": "I don't know",
+            "details": {"reason": f"Error executing generated code: {e}"},
+            "mode": "error"
+        }
 
-    # --------------------------------------------
-    # 4. Summarize final answer with LLM
-    # --------------------------------------------
 
-    summary_prompt = f"""
-You are a data explanation AI.
+# ===================================================
+# EXPLANATION LAYER
+# ===================================================
 
-User question: "{question}"
+EXPLANATION_PROMPT = """
+You are a data analyst explaining results to business users.
 
-Python result:
-{str(result)}
+You will be given:
+- The user's question
+- A structured Python result dict with keys like "answer", "details", "mode"
+- Column meanings
 
-Write a clear answer and a SHORT explanation.
-If there are ties, list them all.
-Convert seconds into hours/days when helpful.
+Your job:
+- Write a SHORT, clean explanation in **1–3 sentences** max.
+- Use ONLY the information found in the result dict.
+- Include key numeric values in plain language:
+  * counts ("3 tickets", "5 callers")
+  * time expressed from seconds into simple units:
+    - if you see fields like Resolution_Time_Seconds or any key containing "seconds",
+      convert the values to a friendly description: e.g.
+      259200 seconds -> "259,200 seconds (72 hours / 3 days)"
+      7200 seconds -> "7,200 seconds (2 hours)"
+- Avoid any statistical jargon:
+  * Do NOT mention standard deviation, variance, distributions, etc.
+  * Use phrases like "much longer than most tickets", "unusually slow compared to typical tickets",
+    "higher than what we usually see", "more often than other callers", etc.
+- For multiple items with the same extreme value (ties), mention that they are tied and give their numbers.
+- For anomaly / outlier / unusual questions:
+  * Focus on which items stand out and by how much in simple terms.
+- Keep it business-friendly, direct, and easy to read.
+- NO fluff. NO long paragraphs.
 
-Format:
-Answer: <short answer>
-Explanation: <why this is the answer>
+User question:
+{question}
+
+Result dict:
+{result}
+
+Column meanings:
+{system_text}
+
+Write a concise explanation:
 """
 
-    final = llm.invoke(summary_prompt).content
-    return final
+
+def explain_result(question: str, result: Any, system_text: str) -> str:
+    prompt = EXPLANATION_PROMPT.format(
+        question=question,
+        result=str(result),
+        system_text=system_text
+    )
+    explanation = llm.invoke(prompt).content.strip()
+    return explanation
+
+
+# ===================================================
+# MAIN ENTRYPOINT FOR STREAMLIT
+# ===================================================
+
+def ask_question(agent_unused, question: str, system_text: str, df=None) -> str:
+    """
+    Main function used by the app.
+
+    Returns a formatted string:
+
+    Answer:
+    <answer>
+
+    Explanation:
+    <short explanation>
+    """
+    if df is None:
+        return "Dataset not loaded."
+
+    # STEP 1 — LLM generates analysis code
+    code = generate_code(question, df, system_text)
+
+    # STEP 2 — Execute the code on the actual df
+    result = execute_code(df, code)
+
+    # STEP 3 — Normalize result
+    if not isinstance(result, dict):
+        result = {
+            "answer": str(result),
+            "details": {"note": "Result was not a dict; converted to string."},
+            "mode": "raw"
+        }
+
+    answer_text = str(result.get("answer", "I don't know")).strip()
+    details = result.get("details", {})
+    mode = str(result.get("mode", "")).strip()
+
+    # STEP 4 — Generate a short, business-friendly explanation
+    explanation_text = explain_result(question, result, system_text).strip()
+    if not explanation_text:
+        explanation_text = "This answer was computed from the dataset, but no further explanation was provided."
+
+    return f"Answer:\n{answer_text}\n\nExplanation:\n{explanation_text}"
+
+
+def build_agent(df, system_text):
+    """
+    Kept for compatibility with the existing app structure.
+    We don't need a complex agent object; df itself is enough.
+    """
+    return df
