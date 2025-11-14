@@ -153,10 +153,9 @@ with header_left:
 with header_right:
     logo_path = Path("mybasepay_logo.png")
     if logo_path.exists():
-        st.image(str(logo_path), use_column_width=False)
+        st.image(str(logo_path), width=120)   # ← adjust size here
     else:
-        st.write("")  # silent if not present
-
+        st.write("")
 
 st.markdown("---")
 
