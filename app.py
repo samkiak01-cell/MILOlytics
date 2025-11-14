@@ -142,7 +142,7 @@ header_left, header_right = st.columns([3, 1])
 with header_left:
     st.markdown(
         """
-        <div class="mbp-header-title">MILOlytics – myBasePay Ticket Analytics</div>
+        <div class="mbp-header-title">MILOlytics – myBasePay Ticket Assistant</div>
         <div class="mbp-header-sub">
             A dark-mode analytics workspace for call center performance, SLA tracking, and outlier detection.
         </div>
@@ -153,16 +153,9 @@ with header_left:
 with header_right:
     logo_path = Path("mybasepay_logo.png")
     if logo_path.exists():
-        st.markdown(
-            f"""
-            <div class="mbp-logo-container">
-                <div class="mbp-logo-wrapper">
-                    <img src="{logo_path.as_posix()}" width="120">
-                </div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
+        st.image(str(logo_path), use_column_width=False)
+    else:
+        st.write("")  # silent if not present
 
 
 st.markdown("---")
