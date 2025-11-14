@@ -1,7 +1,9 @@
 import io
 from pathlib import Path
-import streamlit as st
+
 import pandas as pd
+import streamlit as st
+
 from logic.agent import load_excel, build_agent, ask_question
 
 
@@ -17,96 +19,156 @@ st.set_page_config(
 
 
 # =====================================================
-# Custom CSS (MyBasePay Styling)
+# Dark MyBasePay Dashboard CSS
 # =====================================================
 
-st.markdown("""
+st.markdown(
+    """
 <style>
-
-body {
-    background-color: #F7F9FC;
-    font-family: 'Inter', sans-serif;
+:root {
+    --mbp-navy: #020617;
+    --mbp-navy-softer: #030712;
+    --mbp-navy-soft: #020617;
+    --mbp-cyan: #2BB3C0;
+    --mbp-cyan-soft: rgba(43, 179, 192, 0.35);
+    --mbp-text: #F9FAFB;
+    --mbp-subtext: #9CA3AF;
 }
 
-/* Top-right logo */
-.logo-container {
-    position: absolute;
-    top: 20px;
-    right: 30px;
-    z-index: 10000;
-}
-.logo-container img {
-    width: 170px;
-    height: auto;
+/* Overall page background & text */
+.block-container {
+    background: radial-gradient(circle at top left, #0b1120, #020617 55%, #000000 100%);
+    color: var(--mbp-text);
+    padding-top: 1.5rem;
 }
 
-/* Answer box */
+/* Header text tweaks */
+h1, h2, h3, h4 {
+    color: var(--mbp-text);
+}
+
+/* Header badge */
+.mbp-header-title {
+    font-size: 1.9rem;
+    font-weight: 700;
+    color: var(--mbp-text);
+}
+.mbp-header-sub {
+    font-size: 0.95rem;
+    color: var(--mbp-subtext);
+}
+
+/* Answer card */
 .answer-box {
-    background-color: white;
-    padding: 22px;
-    border-radius: 12px;
-    border-left: 5px solid #2BB3C0;
-    box-shadow: 0px 3px 10px rgba(0,0,0,0.08);
-    margin-top: 20px;
+    background: linear-gradient(135deg, rgba(15,23,42,0.98), rgba(15,23,42,0.9));
+    padding: 20px 22px;
+    border-radius: 14px;
+    border-left: 4px solid var(--mbp-cyan);
+    box-shadow: 0px 10px 30px rgba(0,0,0,0.45);
+    margin-top: 16px;
 }
 
-/* Stats box */
+/* Stats cards */
 .stats-box {
-    background-color: white;
-    padding: 20px;
+    background: radial-gradient(circle at top left, rgba(15,23,42,0.9), rgba(15,23,42,0.95));
+    padding: 14px 18px;
     border-radius: 12px;
-    margin-bottom: 15px;
-    box-shadow: 0px 3px 10px rgba(0,0,0,0.06);
+    border: 1px solid rgba(148,163,184,0.25);
+    margin-bottom: 12px;
+    box-shadow: 0px 6px 18px rgba(0,0,0,0.35);
+}
+
+/* Strong labels inside stats */
+.stats-box strong {
+    color: var(--mbp-text);
 }
 
 /* Button styling */
 .stButton>button {
-    background-color: #0A1F44;
-    color: white;
-    border-radius: 6px;
-    padding: 0.6rem 1.2rem;
-    font-size: 16px;
+    background: linear-gradient(135deg, var(--mbp-cyan), #06b6d4);
+    color: #0f172a;
+    border-radius: 999px;
+    padding: 0.55rem 1.5rem;
+    font-size: 15px;
+    font-weight: 600;
     border: none;
+    box-shadow: 0px 4px 14px rgba(8,145,178,0.5);
 }
 .stButton>button:hover {
-    background-color: #2BB3C0;
-    color: white;
+    background: linear-gradient(135deg, #06b6d4, var(--mbp-cyan));
+    color: #020617;
+}
+
+/* Sidebar styling */
+[data-testid="stSidebar"] {
+    background: radial-gradient(circle at top, #020617, #030712);
+    color: var(--mbp-text);
+}
+[data-testid="stSidebar"] h2,
+[data-testid="stSidebar"] label,
+[data-testid="stSidebar"] p {
+    color: var(--mbp-text);
+}
+
+/* Text input */
+.stTextInput>div>div>input {
+    background-color: #020617;
+    color: var(--mbp-text);
+    border-radius: 8px;
+    border: 1px solid #1f2937;
+}
+
+/* File uploader */
+[data-testid="stFileUploader"] section {
+    background-color: #020617;
+    border-radius: 10px;
+    border: 1px dashed #475569;
 }
 
 </style>
-""", unsafe_allow_html=True)
+""",
+    unsafe_allow_html=True,
+)
 
 
 # =====================================================
-# Header + Logo
+# Header Row (Title + Logo)
 # =====================================================
 
-st.title("MILOlytics – myBasePay Ticket Analytics Assistant")
-st.write("Upload your call center ticket dataset. Analyze trends, SLA performance, and outliers effortlessly.")
+header_left, header_right = st.columns([3, 1])
 
-# Display logo if exists
-logo_path = Path("mybasepay_logo.png")
-if logo_path.exists():
+with header_left:
     st.markdown(
-        f"""
-        <div class="logo-container">
-            <img src="{logo_path.as_posix()}">
+        """
+        <div class="mbp-header-title">MILOlytics – myBasePay Ticket Analytics</div>
+        <div class="mbp-header-sub">
+            A dark-mode analytics workspace for call center performance, SLA tracking, and outlier detection.
         </div>
         """,
-        unsafe_allow_html=True
+        unsafe_allow_html=True,
     )
 
+with header_right:
+    logo_path = Path("mybasepay_logo.png")
+    if logo_path.exists():
+        st.image(str(logo_path), use_column_width=False)
+    else:
+        st.write("")  # silent if not present
+
+
+st.markdown("---")
+
 
 # =====================================================
-# Sidebar — Upload File
+# Sidebar — Upload Dataset
 # =====================================================
 
-st.sidebar.header("Upload Your Dataset")
+st.sidebar.header("Upload Dataset")
 
 uploaded_file = st.sidebar.file_uploader(
-    "Upload BlockData-style Excel file",
+    "Choose a BlockData-style Excel file (.xlsx)",
     type=["xlsx"],
-    help="Must contain the expected structure."
+    help="File should follow the BlockData structure with 'Data' sheet and expected columns.",
 )
 
 default_path = Path("data/BlockData.xlsx")
@@ -124,25 +186,22 @@ system_text = ""
 sample_questions = []
 data_loaded = False
 
-
-# Try loading dataset
 if uploaded_file:
     try:
         df_data, system_text, sample_questions = load_source(uploaded_file.read())
         data_loaded = True
-        st.success("Dataset loaded successfully.")
+        st.sidebar.success("Dataset loaded successfully.")
     except Exception as e:
-        st.error(f"Error loading uploaded file: {e}")
-
+        st.sidebar.error(f"Error reading uploaded file: {e}")
 elif default_path.exists():
     try:
         df_data, system_text, sample_questions = load_source(None)
         data_loaded = True
-        st.info("Using default BlockData.xlsx dataset.")
+        st.sidebar.info("Using default dataset: data/BlockData.xlsx")
     except Exception as e:
-        st.error(f"Error loading default dataset: {e}")
+        st.sidebar.error(f"Error loading default dataset: {e}")
 else:
-    st.warning("Upload a dataset to continue.")
+    st.sidebar.warning("Upload a dataset to begin.")
 
 
 # =====================================================
@@ -150,7 +209,7 @@ else:
 # =====================================================
 
 def human_time(seconds):
-    """Convert seconds into hours/days for readability."""
+    """Convert seconds to a human-friendly string."""
     if pd.isna(seconds):
         return "N/A"
     seconds = float(seconds)
@@ -159,7 +218,7 @@ def human_time(seconds):
     return f"{int(seconds):,} sec ({hours:.1f} hrs / {days:.1f} days)"
 
 
-def compute_stats(df):
+def compute_stats(df: pd.DataFrame):
     stats = {}
 
     # Total tickets
@@ -176,37 +235,47 @@ def compute_stats(df):
         else:
             stats["sla_rate"] = None
             stats["outside_sla"] = None
+    else:
+        stats["sla_rate"] = None
+        stats["outside_sla"] = None
 
     # Resolution Time Stats
     if "Resolution_Time_Seconds" in df.columns:
         rt = df["Resolution_Time_Seconds"].dropna()
         if len(rt) > 0:
-            stats["average_time"] = human_time(rt.mean())
-            stats["min_time"] = human_time(rt.min())
-            stats["max_time"] = human_time(rt.max())
+            stats["avg"] = human_time(rt.mean())
+            stats["min"] = human_time(rt.min())
+            stats["max"] = human_time(rt.max())
         else:
-            stats["average_time"] = "N/A"
-            stats["min_time"] = "N/A"
-            stats["max_time"] = "N/A"
+            stats["avg"] = "N/A"
+            stats["min"] = "N/A"
+            stats["max"] = "N/A"
+    else:
+        stats["avg"] = stats["min"] = stats["max"] = "N/A"
 
-    # Fastest / slowest agent
+    # Fastest / slowest agent (Resolved_By)
     if "Resolved_By" in df.columns and "Resolution_Time_Seconds" in df.columns:
         df_res = df.dropna(subset=["Resolved_By", "Resolution_Time_Seconds"])
         if len(df_res) > 0:
-            avg_times = df_res.groupby("Resolved_By")["Resolution_Time_Seconds"].mean()
-
-            if len(avg_times) > 0:
-                fastest = avg_times.sort_values().head(1)
-                slowest = avg_times.sort_values().tail(1)
-
-                stats["fastest_agent"] = f"{fastest.index[0]} ({human_time(fastest.values[0])})"
-                stats["slowest_agent"] = f"{slowest.index[0]} ({human_time(slowest.values[0])})"
+            grouped = df_res.groupby("Resolved_By")["Resolution_Time_Seconds"].mean()
+            if len(grouped) > 0:
+                fastest = grouped.sort_values().head(1)
+                slowest = grouped.sort_values().tail(1)
+                stats["fastest_agent"] = (
+                    f"{fastest.index[0]} ({human_time(fastest.values[0])})"
+                )
+                stats["slowest_agent"] = (
+                    f"{slowest.index[0]} ({human_time(slowest.values[0])})"
+                )
             else:
                 stats["fastest_agent"] = "N/A"
                 stats["slowest_agent"] = "N/A"
         else:
             stats["fastest_agent"] = "N/A"
             stats["slowest_agent"] = "N/A"
+    else:
+        stats["fastest_agent"] = "N/A"
+        stats["slowest_agent"] = "N/A"
 
     return stats
 
@@ -217,20 +286,17 @@ def compute_stats(df):
 
 if data_loaded and df_data is not None:
 
-    # Layout: left = questions • right = stats
-    left_col, right_col = st.columns([2.5, 1])
+    left_col, right_col = st.columns([2.7, 1.3])
 
-    # ----------------------------------------
-    # LEFT — Ask Question
-    # ----------------------------------------
-
+    # ------------------------------
+    # LEFT — Question + Answer
+    # ------------------------------
     with left_col:
-
-        st.subheader("Ask a Question")
+        st.subheader("Ask MILOlytics a Question")
 
         user_question = st.text_input(
-            "Your Question:",
-            placeholder="Example: Which ticket took the longest to resolve?"
+            "Your Question",
+            placeholder="Example: Which ticket took the longest to resolve?",
         )
 
         if st.button("Submit Question"):
@@ -249,33 +315,37 @@ if data_loaded and df_data is not None:
                     except Exception as e:
                         st.error(f"An error occurred: {e}")
 
-    # ----------------------------------------
+    # ------------------------------
     # RIGHT — Stats Panel
-    # ----------------------------------------
-
+    # ------------------------------
     with right_col:
-
         st.subheader("📊 Quick Statistics")
 
         stats = compute_stats(df_data)
 
+        # Total tickets
         st.markdown("<div class='stats-box'>", unsafe_allow_html=True)
         st.markdown(f"**Total Tickets:** {stats['total']}")
         st.markdown("</div>", unsafe_allow_html=True)
 
+        # Resolution times
         st.markdown("<div class='stats-box'>", unsafe_allow_html=True)
-        st.markdown(f"**Average Resolution Time:** {stats['average_time']}")
-        st.markdown(f"**Fastest Ticket:** {stats['min_time']}")
-        st.markdown(f"**Slowest Ticket:** {stats['max_time']}")
+        st.markdown(f"**Average Resolution Time:** {stats['avg']}")
+        st.markdown(f"**Fastest Ticket:** {stats['min']}")
+        st.markdown(f"**Slowest Ticket:** {stats['max']}")
         st.markdown("</div>", unsafe_allow_html=True)
 
+        # Agents
         st.markdown("<div class='stats-box'>", unsafe_allow_html=True)
         st.markdown(f"**Fastest Agent:** {stats['fastest_agent']}")
         st.markdown(f"**Slowest Agent:** {stats['slowest_agent']}")
         st.markdown("</div>", unsafe_allow_html=True)
 
-        if "sla_rate" in stats:
+        # SLA
+        if stats["sla_rate"] is not None:
             st.markdown("<div class='stats-box'>", unsafe_allow_html=True)
             st.markdown(f"**SLA Compliance:** {stats['sla_rate']:.1f}%")
             st.markdown(f"**Outside SLA:** {stats['outside_sla']}")
             st.markdown("</div>", unsafe_allow_html=True)
+else:
+    st.info("Upload a dataset using the sidebar to get started.")
