@@ -10,14 +10,14 @@ from logic.agent import load_excel, build_agent, ask_question
 # ================================================
 
 st.set_page_config(
-    page_title="myBasePay Ticket Analytics Assistant",
+    page_title="MILOlytics",
     layout="wide",
 )
 
 st.title("myBasePay Ticket Analytics Assistant")
 st.write(
-    "Upload your ticket dataset and ask analytical questions. "
-    "The assistant will compute real answers using Pandas."
+    "Upload call center tickets data. "
+    "MILOlytics will help you with all your analytical needs."
 )
 
 
