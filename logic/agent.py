@@ -2,6 +2,8 @@ import pandas as pd
 from langchain_openai import ChatOpenAI
 import json
 import numpy as np
+import re
+
 
 
 # ======================================================
@@ -9,12 +11,7 @@ import numpy as np
 # ======================================================
 
 def clean_dataframe(df):
-    """
-    Ensures all date, numeric, and text columns are standardized.
-    Prevents LLM from misreading blank strings as null values.
-    """
-
-    # Convert datetimes
+    """Ensures datetime, numeric, and name fields are standardized."""
     datetime_cols = [
         "Created_Date_Time",
         "Updated_Date_Time",
@@ -26,29 +23,27 @@ def clean_dataframe(df):
         if col in df.columns:
             df[col] = pd.to_datetime(df[col], errors="coerce")
 
-    # Convert numeric columns
     if "Resolution_Time_Seconds" in df.columns:
         df["Resolution_Time_Seconds"] = pd.to_numeric(
             df["Resolution_Time_Seconds"], errors="coerce"
         )
 
-    # Normalize agent columns
     name_cols = ["Caller", "Created_By", "Updated_By", "Resolved_By"]
 
     for col in name_cols:
         if col in df.columns:
             df[col] = (
                 df[col]
-                .astype(str)
-                .str.strip()
-                .replace({"nan": None, "None": None, "": None})
+                  .astype(str)
+                  .str.strip()
+                  .replace({"nan": None, "None": None, "": None})
             )
 
-    # Ensure Description is string
     if "Description" in df.columns:
         df["Description"] = df["Description"].astype(str).fillna("")
 
     return df
+
 
 
 # ======================================================
@@ -56,177 +51,217 @@ def clean_dataframe(df):
 # ======================================================
 
 def load_excel(source):
-    """
-    Expects Excel with:
-      Sheet 1 → Data
-      Sheet 2 → System Prompt
-      Sheet 3 → Sample Questions
-    """
+    """Load dataset + system text + sample questions."""
     df_data = pd.read_excel(source, sheet_name=0)
     system_text = str(pd.read_excel(source, sheet_name=1).iloc[0, 0])
     df_questions = pd.read_excel(source, sheet_name=2)
 
-    # Clean data before anything else
     df_data = clean_dataframe(df_data)
-
     sample_questions = df_questions.iloc[:, 0].dropna().tolist()
+
     return df_data, system_text, sample_questions
 
 
+
 # ======================================================
-# Build LLM Agent
+# Chat model
 # ======================================================
 
 def build_agent(df, system_prompt):
-    """
-    Only builds the LLM model.
-    Data handling is separate so it stays clean & consistent.
-    """
     llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
     return {"llm": llm, "df": df, "system": system_prompt}
 
 
+
 # ======================================================
-# LLM-Driven Analytics Engine
+# JSON extraction helpers (VERY IMPORTANT FIX)
+# ======================================================
+
+def extract_json(text):
+    """
+    Extracts the FIRST valid JSON object from an LLM response,
+    even if extra text is around it.
+    """
+
+    # find the first {...} block
+    match = re.search(r"{.*}", text, flags=re.DOTALL)
+    if match:
+        json_str = match.group(0)
+
+        try:
+            return json.loads(json_str)
+        except:
+            pass  # fallthrough to next fix attempt
+
+    # Try to repair JSON with GPT
+    return None
+
+
+
+def repair_json_with_llm(llm, broken_text):
+    """Ask GPT to fix malformed JSON."""
+    fix_prompt = f"""
+Your job is to FIX the malformed JSON below and return VALID JSON only.
+
+Malformed JSON:
+{broken_text}
+
+Return ONLY valid JSON. Nothing else.
+"""
+
+    fixed = llm.invoke(fix_prompt).content
+
+    try:
+        match = re.search(r"{.*}", fixed, flags=re.DOTALL)
+        if match:
+            return json.loads(match.group(0))
+    except:
+        return None
+
+    return None
+
+
+
+# ======================================================
+# MAIN ASK FUNCTION
 # ======================================================
 
 def ask_question(agent, question, system_prompt, df):
-    """
-    Clean, universal answering function.
-    - LLM interprets the question
-    - LLM decides what fields to use
-    - Python computes the actual numbers
-    - LLM writes a clean final answer + explanation
-    """
-
-    df = clean_dataframe(df)  # always use cleaned data
-
+    df = clean_dataframe(df)
     llm = agent["llm"]
 
-    # First stage: let the LLM parse the question
-    interpretation_prompt = f"""
-You are an analytics interpreter. 
-You must read the user's question and output JSON telling Python what to compute.
+    # --------------------------------------------
+    # 1. LLM interpret question → JSON instructions
+    # --------------------------------------------
 
-Available columns:
+    interpretation_prompt = f"""
+You are an analytics interpreter.
+
+Given the question:
+"{question}"
+
+And these columns:
 {list(df.columns)}
 
-For the question: "{question}"
+Return ONLY a JSON dictionary with keys:
+- operation: one of ["max","min","average","count","groupby","top","bottom"]
+- column: column name to use
+- groupby: column name or null
+- filters: dict of filters or null
+- return_multiple: true/false
+- natural_language_goal: short description of desired final answer
 
-Return a JSON dictionary with:
-- "operation": one of ["max", "min", "average", "count", "groupby", "match", "filter", "top", "bottom"]
-- "column": which column(s) the operation should apply to
-- "groupby": which column to group by (or null)
-- "filters": conditions needed (or null)
-- "return_multiple": true if more than one answer is possible
-- "natural_language_goal": short text describing what final answer should look like
-
-Return ONLY JSON.
+Respond with JSON ONLY.
 """
 
-    try:
-        parsed = llm.invoke(interpretation_prompt).content
-        parsed_json = json.loads(parsed)
-    except:
-        return "I couldn't interpret your request."
+    raw_response = llm.invoke(interpretation_prompt).content
 
+    # Try extracting JSON
+    parsed_json = extract_json(raw_response)
+
+    if parsed_json is None:
+        parsed_json = repair_json_with_llm(llm, raw_response)
+
+    if parsed_json is None:
+        return "I couldn't interpret your request due to invalid JSON."
+
+    # Extract fields safely
     operation = parsed_json.get("operation")
     col = parsed_json.get("column")
     group = parsed_json.get("groupby")
     filters = parsed_json.get("filters")
-    multi = parsed_json.get("return_multiple", False)
     nl_goal = parsed_json.get("natural_language_goal", "")
+    multi = parsed_json.get("return_multiple", False)
 
-    # ====================================================
-    # APPLY FILTERS
-    # ====================================================
-    working_df = df.copy()
+    # --------------------------------------------
+    # 2. Apply filters
+    # --------------------------------------------
+
+    working = df.copy()
 
     if isinstance(filters, dict):
         for k, v in filters.items():
-            if k in working_df.columns:
-                working_df = working_df[working_df[k] == v]
+            if k in working.columns:
+                working = working[working[k] == v]
 
-    if len(working_df) == 0:
-        return "No matching records were found to answer your question."
+    if working.empty:
+        return "No records matched that question."
 
-    # ====================================================
-    # CORE COMPUTATION
-    # ====================================================
+    # --------------------------------------------
+    # 3. Perform computation
+    # --------------------------------------------
 
     result = None
 
-    # -------- Grouped operations --------
-    if group and group in working_df.columns and col in working_df.columns:
-        grouped = working_df.groupby(group)[col]
+    try:
+        if group and group in working.columns and col in working.columns:
+            grouped = working.groupby(group)[col]
 
-        # Safety: convert to numeric if possible
-        try:
-            grouped_numeric = grouped.mean()
-        except:
-            grouped_numeric = grouped.apply(lambda x: x)
+            # numeric enforcement
+            try:
+                grouped_vals = grouped.mean()
+            except:
+                grouped_vals = grouped.apply(lambda x: x)
 
-        if operation == "max":
-            max_val = grouped_numeric.max()
-            result = grouped_numeric[grouped_numeric == max_val]
+            if operation == "max":
+                max_val = grouped_vals.max()
+                result = grouped_vals[grouped_vals == max_val]
 
-        elif operation == "min":
-            min_val = grouped_numeric.min()
-            result = grouped_numeric[grouped_numeric == min_val]
+            elif operation == "min":
+                min_val = grouped_vals.min()
+                result = grouped_vals[grouped_vals == min_val]
 
-        else:
-            result = grouped_numeric
+            else:
+                result = grouped_vals
 
-    # -------- Simple operations --------
-    elif col in working_df.columns:
+        elif col in working.columns:
+            series = working[col]
 
-        series = working_df[col]
+            try:
+                series = pd.to_numeric(series, errors="coerce")
+            except:
+                pass
 
-        # convert numbers if needed
-        try:
-            series = pd.to_numeric(series, errors="coerce")
-        except:
-            pass
+            if operation == "max":
+                val = series.max()
+                result = working[working[col] == val]
 
-        if operation == "max":
-            max_val = series.max()
-            result = working_df[working_df[col] == max_val]
+            elif operation == "min":
+                val = series.min()
+                result = working[working[col] == val]
 
-        elif operation == "min":
-            min_val = series.min()
-            result = working_df[working_df[col] == min_val]
+            elif operation == "average":
+                result = series.mean()
 
-        elif operation == "average":
-            result = series.mean()
+            elif operation == "count":
+                result = len(series)
 
-        elif operation == "count":
-            result = len(series)
+            else:
+                result = series
 
-        else:
-            result = series
+    except Exception as e:
+        return f"An error occurred performing the calculation: {e}"
 
-    # ====================================================
-    # FORMAT FOR LLM OUTPUT
-    # ====================================================
+    # --------------------------------------------
+    # 4. Summarize final answer with LLM
+    # --------------------------------------------
 
     summary_prompt = f"""
-You are a data explanation AI for myBasePay.
+You are a data explanation AI.
 
-The user asked: "{question}"
+User question: "{question}"
 
-Here is the computed raw result (Python output):
-
+Python result:
 {str(result)}
 
-Write a clear answer followed by a very short explanation.
-Keep the tone professional but simple.
-If more than one person/ticket is tied, list all of them.
-If numeric values are included, convert seconds to hours/days when appropriate.
+Write a clear answer and a SHORT explanation.
+If there are ties, list them all.
+Convert seconds into hours/days when helpful.
 
-Answer format:
+Format:
 Answer: <short answer>
 Explanation: <why this is the answer>
 """
 
-    final_answer = llm.invoke(summary_prompt).content
-    return final_answer
+    final = llm.invoke(summary_prompt).content
+    return final
