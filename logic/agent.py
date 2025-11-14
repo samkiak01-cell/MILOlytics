@@ -79,7 +79,14 @@ Columns and meanings:
 
 Important semantic rules:
 - "Who submits the most tickets?" or "who called in the most?" -> group by Caller.
-- "Which call center member handles/resolves tickets fastest/slowest?" -> group by Created_By or Resolved_By using Resolution_Time_Seconds.
+- "Which call center member handles/resolves tickets fastest/slowest?" rules:
+    * ALWAYS use the column "Resolved_By" (never Created_By).
+    * A resolved ticket is defined STRICTLY as: Resolution_Date_Time not null AND Resolution_Time_Seconds not null.
+    * Use only df rows where both of these conditions are true.
+    * Example filter to get resolved tickets:
+          df2 = df[df["Resolution_Time_Seconds"].notna() & df["Resolution_Date_Time"].notna()]
+    * Then compute average Resolution_Time_Seconds grouped by Resolved_By.
+    * Detect ties (multiple agents with same avg).
 - SLA questions -> compare Resolution_Date_Time (or Resolution_Time_Seconds) with Due_Date_Time.
 - For questions about "outliers", "unusual", "anomalies", "stands out", treat these as items that are clearly at the extreme (top or bottom) compared to the rest.
 """
