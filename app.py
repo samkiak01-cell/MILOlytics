@@ -144,7 +144,7 @@ with header_left:
         """
         <div class="mbp-header-title">MILOlytics – myBasePay Ticket Assistant</div>
         <div class="mbp-header-sub">
-            A dark-mode analytics workspace for call center performance, SLA tracking, and outlier detection.
+            Our homemade workspace tool for call center performance, SLA tracking, and outlier detection.
         </div>
         """,
         unsafe_allow_html=True,
