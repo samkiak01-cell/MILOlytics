@@ -37,7 +37,7 @@ st.markdown(
 .block-container {
     background: radial-gradient(circle at top left, #0b1120, #020617 55%, #000000 100%);
     color: var(--mbp-text);
-    padding-top: 4rem !important;  /* 🔥 MOVES TITLE DOWN BELOW TOP BAR */
+    padding-top: 4rem !important; 
 }
 
 /* Header title */
@@ -101,7 +101,7 @@ st.markdown(
     color: #020617;
 }
 
-/* Sidebar styling */
+/* Sidebar */
 [data-testid="stSidebar"] {
     background: radial-gradient(circle at top, #020617, #030712);
     color: var(--mbp-text);
@@ -112,7 +112,7 @@ st.markdown(
     color: var(--mbp-text);
 }
 
-/* Dark text input */
+/* Text Input */
 .stTextInput>div>div>input {
     background-color: #020617;
     color: var(--mbp-text);
@@ -120,7 +120,7 @@ st.markdown(
     border: 1px solid #1f2937;
 }
 
-/* File uploader */
+/* File Uploader */
 [data-testid="stFileUploader"] section {
     background-color: #020617;
     border-radius: 10px;
@@ -153,7 +153,7 @@ with header_left:
 with header_right:
     logo_path = Path("mybasepay_logo.png")
     if logo_path.exists():
-        st.image(str(logo_path), width=120)   # ← adjust size here
+        st.image(str(logo_path), width=120)
     else:
         st.write("")
 
@@ -186,6 +186,7 @@ df_data = None
 system_text = ""
 sample_questions = []
 data_loaded = False
+
 
 if uploaded_file:
     try:
@@ -255,6 +256,7 @@ def compute_stats(df: pd.DataFrame):
             else:
                 stats["fastest_agent"] = "N/A"
                 stats["slowest_agent"] = "N/A"
+
     return stats
 
 
@@ -266,7 +268,7 @@ if data_loaded and df_data is not None:
 
     left_col, right_col = st.columns([2.7, 1.3])
 
-    # LEFT SIDE — Ask Question
+    # LEFT SIDE — Ask MILOlytics
     with left_col:
 
         st.subheader("Ask MILOlytics a Question")
@@ -284,37 +286,47 @@ if data_loaded and df_data is not None:
                     agent = build_agent(df_data, system_text)
                     answer = ask_question(agent, user_q, system_text, df_data)
 
-                st.markdown("<div class='answer-box'>", unsafe_allow_html=True)
-                st.markdown(answer)
-                st.markdown("</div>", unsafe_allow_html=True)
+                st.markdown(f"""
+<div class='answer-box'>
+{answer}
+</div>
+""", unsafe_allow_html=True)
 
-    # RIGHT SIDE — Stats Panel
+    # RIGHT SIDE — Quick Stats
     with right_col:
 
         st.subheader("📊 Quick Stats")
 
         stats = compute_stats(df_data)
 
-        st.markdown("<div class='stats-box'>", unsafe_allow_html=True)
-        st.markdown(f"**Total Tickets:** {stats['total']}")
-        st.markdown("</div>", unsafe_allow_html=True)
+        st.markdown(f"""
+<div class='stats-box'>
+<b>Total Tickets:</b> {stats['total']}
+</div>
+""", unsafe_allow_html=True)
 
-        st.markdown("<div class='stats-box'>", unsafe_allow_html=True)
-        st.markdown(f"**Avg Resolution:** {stats['avg']}")
-        st.markdown(f"**Fastest Ticket:** {stats['min']}")
-        st.markdown(f"**Slowest Ticket:** {stats['max']}")
-        st.markdown("</div>", unsafe_allow_html=True)
+        st.markdown(f"""
+<div class='stats-box'>
+<b>Avg Resolution:</b> {stats['avg']}<br>
+<b>Fastest Ticket:</b> {stats['min']}<br>
+<b>Slowest Ticket:</b> {stats['max']}
+</div>
+""", unsafe_allow_html=True)
 
-        st.markdown("<div class='stats-box'>", unsafe_allow_html=True)
-        st.markdown(f"**Fastest Agent:** {stats['fastest_agent']}")
-        st.markdown(f"**Slowest Agent:** {stats['slowest_agent']}")
-        st.markdown("</div>", unsafe_allow_html=True)
+        st.markdown(f"""
+<div class='stats-box'>
+<b>Fastest Agent:</b> {stats['fastest_agent']}<br>
+<b>Slowest Agent:</b> {stats['slowest_agent']}
+</div>
+""", unsafe_allow_html=True)
 
         if stats.get("sla_rate") is not None:
-            st.markdown("<div class='stats-box'>", unsafe_allow_html=True)
-            st.markdown(f"**SLA Compliance:** {stats['sla_rate']:.1f}%")
-            st.markdown(f"**Outside SLA:** {stats['outside_sla']}")
-            st.markdown("</div>", unsafe_allow_html=True)
+            st.markdown(f"""
+<div class='stats-box'>
+<b>SLA Compliance:</b> {stats['sla_rate']:.1f}%<br>
+<b>Outside SLA:</b> {stats['outside_sla']}
+</div>
+""", unsafe_allow_html=True)
 
 else:
     st.info("Upload a dataset using the sidebar to get started.")
