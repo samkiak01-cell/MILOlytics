@@ -37,7 +37,7 @@ st.markdown(
 .block-container {
     background: radial-gradient(circle at top left, #0b1120, #020617 55%, #000000 100%);
     color: var(--mbp-text);
-    padding-top: 4rem !important; 
+    padding-top: 4rem !important;
 }
 
 /* Header title */
@@ -144,7 +144,7 @@ with header_left:
         """
         <div class="mbp-header-title">MILOlytics – myBasePay Ticket Assistant</div>
         <div class="mbp-header-sub">
-            Our homemade workspace tool for call center performance, SLA tracking, and outlier detection.
+            Real-time performance insights, SLA monitoring, and call center analytics.
         </div>
         """,
         unsafe_allow_html=True,
@@ -153,7 +153,9 @@ with header_left:
 with header_right:
     logo_path = Path("mybasepay_logo.png")
     if logo_path.exists():
-        st.image(str(logo_path), width=120)
+        st.markdown("<div class='mbp-logo-wrapper'>", unsafe_allow_html=True)
+        st.image(str(logo_path), width=115)
+        st.markdown("</div>", unsafe_allow_html=True)
     else:
         st.write("")
 
@@ -167,12 +169,13 @@ st.markdown("---")
 st.sidebar.header("Upload Dataset")
 
 uploaded_file = st.sidebar.file_uploader(
-    "Choose a BlockData-style Excel file (.xlsx)",
+    "Upload Demo Data (.xlsx)",
     type=["xlsx"],
-    help="Must include 'Data' sheet and the expected column structure.",
+    help="Upload your Demo Data file or rely on the default dataset.",
 )
 
-default_path = Path("data/BlockData.xlsx")
+# NEW default dataset path
+default_path = Path("data/Demo Data.xlsx")
 
 
 @st.cache_data(show_spinner=True)
@@ -188,6 +191,7 @@ sample_questions = []
 data_loaded = False
 
 
+# Load dataset logic
 if uploaded_file:
     try:
         df_data, system_text, sample_questions = load_source(uploaded_file.read())
@@ -200,13 +204,13 @@ elif default_path.exists():
     try:
         df_data, system_text, sample_questions = load_source(None)
         data_loaded = True
-        st.sidebar.info("Using default dataset: BlockData.xlsx")
+        st.sidebar.info("Using default Demo Data.xlsx")
     except Exception as e:
         st.sidebar.error(f"Error loading default dataset: {e}")
 
 
 # =====================================================
-# Helper Functions
+# Helper Functions (Updated for DEMO DATA)
 # =====================================================
 
 def human_time(seconds):
@@ -223,16 +227,18 @@ def compute_stats(df: pd.DataFrame):
 
     stats["total"] = len(df)
 
-    if "Due_Date_Time" in df.columns and "Resolution_Date_Time" in df.columns:
-        valid = df.dropna(subset=["Due_Date_Time", "Resolution_Date_Time"])
+    # SLA (Demo Data uses Resolved_Date + Due_Date)
+    if "Due_Date" in df.columns and "Resolved_Date" in df.columns:
+        valid = df.dropna(subset=["Due_Date", "Resolved_Date"])
         if len(valid) > 0:
-            late = (valid["Resolution_Date_Time"] > valid["Due_Date_Time"]).sum()
+            late = (valid["Resolved_Date"] > valid["Due_Date"]).sum()
             stats["sla_rate"] = 100 - (late / len(valid) * 100)
             stats["outside_sla"] = late
         else:
             stats["sla_rate"] = None
             stats["outside_sla"] = None
 
+    # Resolution Times
     if "Resolution_Time_Seconds" in df.columns:
         rt = df["Resolution_Time_Seconds"].dropna()
         if len(rt) > 0:
@@ -244,7 +250,8 @@ def compute_stats(df: pd.DataFrame):
             stats["min"] = "N/A"
             stats["max"] = "N/A"
 
-    if "Resolved_By" in df.columns and "Resolution_Time_Seconds" in df.columns:
+    # Agent Performance
+    if "Resolved_By" in df.columns:
         df2 = df.dropna(subset=["Resolved_By", "Resolution_Time_Seconds"])
         if len(df2) > 0:
             grouped = df2.groupby("Resolved_By")["Resolution_Time_Seconds"].mean()
