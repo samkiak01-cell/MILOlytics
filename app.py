@@ -127,7 +127,7 @@ header_left, header_right = st.columns([3, 1])
 with header_left:
     st.markdown(
         """
-        <div class="mbp-header-title">MILOlytics – myBasePay Ticket Assistant</div>
+        <div class="mbp-header-title">Call Sensei</div>
         <div class="mbp-header-sub">
             AI-powered insights for call center performance, SLA tracking, and trend detection.
         </div>
