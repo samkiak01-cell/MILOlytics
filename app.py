@@ -174,7 +174,7 @@ uploaded_file = st.sidebar.file_uploader(
     help="Upload your Demo Data file or rely on the default dataset.",
 )
 
-# NEW default dataset path
+# Default Demo Data file
 default_path = Path("data/Demo Data.xlsx")
 
 
@@ -189,7 +189,6 @@ df_data = None
 system_text = ""
 sample_questions = []
 data_loaded = False
-
 
 # Load dataset logic
 if uploaded_file:
@@ -210,7 +209,7 @@ elif default_path.exists():
 
 
 # =====================================================
-# Helper Functions (Updated for DEMO DATA)
+# Helper Functions (Aligned with Demo Data + agent.py)
 # =====================================================
 
 def human_time(seconds):
@@ -222,47 +221,80 @@ def human_time(seconds):
     return f"{int(seconds):,} sec ({hours:.1f} hrs / {days:.1f} days)"
 
 
+def format_agent_group(names, seconds_value):
+    """Pretty-print fastest/slowest agents with ties."""
+    if not names:
+        return "N/A"
+    label_time = human_time(seconds_value)
+    if len(names) == 1:
+        return f"{names[0]} ({label_time})"
+    if len(names) == 2:
+        return f"{names[0]} & {names[1]} ({label_time})"
+    # 3+ names
+    return f"{', '.join(names[:2])} + {len(names)-2} others ({label_time})"
+
+
 def compute_stats(df: pd.DataFrame):
-    stats = {}
+    """
+    Quick Stats aligned with the Demo Data schema and agent logic:
+    - Resolution_Time_Seconds for durations
+    - Resolved_By for agent performance
+    - SLA_Met for SLA compliance
+    """
+    stats = {
+        "total": len(df),
+        "avg": "N/A",
+        "min": "N/A",
+        "max": "N/A",
+        "fastest_agent": "N/A",
+        "slowest_agent": "N/A",
+        "sla_rate": None,
+        "outside_sla": None,
+    }
 
-    stats["total"] = len(df)
+    # --- Resolution time stats ---
+    if "Resolution_Time_Seconds" in df.columns:
+        rt = pd.to_numeric(df["Resolution_Time_Seconds"], errors="coerce").dropna()
+        if len(rt) > 0:
+            stats["avg"] = human_time(rt.mean())
+            stats["min"] = human_time(rt.min())
+            stats["max"] = human_time(rt.max())
 
-    # SLA (Demo Data uses Resolved_Date + Due_Date)
-    if "Due_Date" in df.columns and "Resolved_Date" in df.columns:
+    # --- Agent performance (fastest/slowest by avg resolution) ---
+    if "Resolved_By" in df.columns and "Resolution_Time_Seconds" in df.columns:
+        df_agents = df.dropna(subset=["Resolved_By", "Resolution_Time_Seconds"]).copy()
+        df_agents["Resolution_Time_Seconds"] = pd.to_numeric(
+            df_agents["Resolution_Time_Seconds"], errors="coerce"
+        )
+        df_agents = df_agents.dropna(subset=["Resolution_Time_Seconds"])
+        if not df_agents.empty:
+            grouped = df_agents.groupby("Resolved_By")["Resolution_Time_Seconds"].mean()
+            if len(grouped) > 0:
+                min_val = grouped.min()
+                max_val = grouped.max()
+                fastest_names = list(grouped[grouped == min_val].index)
+                slowest_names = list(grouped[grouped == max_val].index)
+                stats["fastest_agent"] = format_agent_group(fastest_names, min_val)
+                stats["slowest_agent"] = format_agent_group(slowest_names, max_val)
+
+    # --- SLA from SLA_Met if available ---
+    if "SLA_Met" in df.columns:
+        sla_series = df["SLA_Met"].dropna().astype(str).str.lower()
+        total_sla = len(sla_series)
+        if total_sla > 0:
+            met_mask = sla_series.isin(["yes", "y", "true", "1"])
+            met_count = int(met_mask.sum())
+            not_met = total_sla - met_count
+            stats["sla_rate"] = met_count / total_sla * 100
+            stats["outside_sla"] = not_met
+
+    # Fallback SLA based on dates only if SLA_Met missing or unusable
+    if stats["sla_rate"] is None and "Due_Date" in df.columns and "Resolved_Date" in df.columns:
         valid = df.dropna(subset=["Due_Date", "Resolved_Date"])
         if len(valid) > 0:
             late = (valid["Resolved_Date"] > valid["Due_Date"]).sum()
             stats["sla_rate"] = 100 - (late / len(valid) * 100)
             stats["outside_sla"] = late
-        else:
-            stats["sla_rate"] = None
-            stats["outside_sla"] = None
-
-    # Resolution Times
-    if "Resolution_Time_Seconds" in df.columns:
-        rt = df["Resolution_Time_Seconds"].dropna()
-        if len(rt) > 0:
-            stats["avg"] = human_time(rt.mean())
-            stats["min"] = human_time(rt.min())
-            stats["max"] = human_time(rt.max())
-        else:
-            stats["avg"] = "N/A"
-            stats["min"] = "N/A"
-            stats["max"] = "N/A"
-
-    # Agent Performance
-    if "Resolved_By" in df.columns:
-        df2 = df.dropna(subset=["Resolved_By", "Resolution_Time_Seconds"])
-        if len(df2) > 0:
-            grouped = df2.groupby("Resolved_By")["Resolution_Time_Seconds"].mean()
-            if len(grouped) > 0:
-                fast = grouped.sort_values().head(1)
-                slow = grouped.sort_values().tail(1)
-                stats["fastest_agent"] = f"{fast.index[0]} ({human_time(fast.values[0])})"
-                stats["slowest_agent"] = f"{slow.index[0]} ({human_time(slow.values[0])})"
-            else:
-                stats["fastest_agent"] = "N/A"
-                stats["slowest_agent"] = "N/A"
 
     return stats
 
