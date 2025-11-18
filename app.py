@@ -1,254 +1,388 @@
+import io
 from pathlib import Path
-from typing import Tuple, List, Union, IO, Any
 
 import pandas as pd
-from langchain_openai import ChatOpenAI
+import streamlit as st
+
+from logic.agent import load_excel, build_agent, ask_question
 
 
-# ===================================================
-# LLM INITIALISATION
-# ===================================================
+# =====================================================
+# Page Config
+# =====================================================
 
-# Single shared LLM instance for this module.
-llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
+st.set_page_config(
+    page_title="MILOlytics – myBasePay Analytics",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
 
 
-# ===================================================
-# EXCEL LOADING
-# ===================================================
+# =====================================================
+# Dark MyBasePay Dashboard CSS
+# =====================================================
 
-def load_excel(
-    source: Union[str, Path, IO[bytes]]
-) -> Tuple[pd.DataFrame, str, List[str]]:
+st.markdown(
     """
-    Load an Excel file and return:
-      - df: main ticket dataset (first sheet or 'Data'/'Sheet1')
-      - system_text: optional system prompt text (if 'System Prompt' sheet exists)
-      - sample_questions: optional questions (if 'Questions' sheet exists)
+<style>
 
-    This is schema-aware but not tied to any specific workbook name.
+:root {
+    --mbp-navy: #020617;
+    --mbp-cyan: #2BB3C0;
+    --mbp-text: #F9FAFB;
+    --mbp-subtext: #9CA3AF;
+}
+
+/* Overall page background */
+.block-container {
+    background: radial-gradient(circle at top left, #0b1120, #020617 55%, #000000 100%);
+    color: var(--mbp-text);
+    padding-top: 4rem !important;
+}
+
+/* Header title */
+.mbp-header-title {
+    font-size: 2.2rem;
+    font-weight: 700;
+    margin-bottom: 4px;
+}
+.mbp-header-sub {
+    font-size: 1rem;
+    color: var(--mbp-subtext);
+}
+
+/* Logo placement */
+.mbp-logo-wrapper {
+    background: white;
+    padding: 12px 22px;
+    border-radius: 40px;
+    display: inline-block;
+    box-shadow: 0px 5px 20px rgba(255, 255, 255, 0.12);
+}
+.mbp-logo-container {
+    display: flex;
+    justify-content: flex-end;
+    align-items: center;
+}
+
+/* Answer card */
+.answer-box {
+    background: linear-gradient(135deg, rgba(15,23,42,0.98), rgba(15,23,42,0.9));
+    padding: 20px 22px;
+    border-radius: 14px;
+    border-left: 4px solid var(--mbp-cyan);
+    box-shadow: 0px 10px 30px rgba(0,0,0,0.45);
+    margin-top: 16px;
+}
+
+/* Stats cards */
+.stats-box {
+    background: radial-gradient(circle at top left, rgba(15,23,42,0.9), rgba(15,23,42,0.95));
+    padding: 14px 18px;
+    border-radius: 12px;
+    border: 1px solid rgba(148,163,184,0.25);
+    margin-bottom: 12px;
+    box-shadow: 0px 6px 18px rgba(0,0,0,0.35);
+}
+
+/* Buttons */
+.stButton>button {
+    background: linear-gradient(135deg, var(--mbp-cyan), #06b6d4);
+    color: #0f172a;
+    border-radius: 999px;
+    padding: 0.55rem 1.5rem;
+    font-size: 15px;
+    font-weight: 600;
+    border: none;
+    box-shadow: 0px 4px 14px rgba(8,145,178,0.5);
+}
+.stButton>button:hover {
+    background: linear-gradient(135deg, #06b6d4, var(--mbp-cyan));
+    color: #020617;
+}
+
+/* Sidebar styling */
+[data-testid="stSidebar"] {
+    background: radial-gradient(circle at top, #020617, #030712);
+    color: var(--mbp-text);
+}
+[data-testid="stSidebar"] h2,
+[data-testid="stSidebar"] label,
+[data-testid="stSidebar"] p {
+    color: var(--mbp-text);
+}
+
+/* Dark text input */
+.stTextInput>div>div>input {
+    background-color: #020617;
+    color: var(--mbp-text);
+    border-radius: 8px;
+    border: 1px solid #1f2937;
+}
+
+/* File uploader */
+[data-testid="stFileUploader"] section {
+    background-color: #020617;
+    border-radius: 10px;
+    border: 1px dashed #475569;
+}
+
+</style>
+""",
+    unsafe_allow_html=True,
+)
+
+
+# =====================================================
+# Header Row (Title + Logo)
+# =====================================================
+
+header_left, header_right = st.columns([3, 1])
+
+with header_left:
+    st.markdown(
+        """
+        <div class="mbp-header-title">MILOlytics – myBasePay Ticket Assistant</div>
+        <div class="mbp-header-sub">
+            Our internal analytics agent for ticket resolution trends, SLA tracking, and call center insights.
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+with header_right:
+    logo_path = Path("mybasepay_logo.png")
+    if logo_path.exists():
+        st.image(str(logo_path), width=120)
+    else:
+        st.write("")
+
+st.markdown("---")
+
+
+# =====================================================
+# Sidebar — Upload Dataset
+# =====================================================
+
+st.sidebar.header("Upload Dataset")
+
+uploaded_file = st.sidebar.file_uploader(
+    "Upload your Demo Data Excel (.xlsx)",
+    type=["xlsx"],
+)
+
+# 🔹 Default is now Demo Data.xlsx only
+default_path = Path("data/Demo Data.xlsx")
+
+
+def load_source(file_bytes: bytes | None):
     """
-    xls = pd.ExcelFile(source)
-    sheets = xls.sheet_names
-
-    # 1) Pick data sheet: prefer "Data" or "Sheet1", else the first sheet.
-    data_sheet = None
-    for candidate in ["Data", "Sheet1"]:
-        if candidate in sheets:
-            data_sheet = candidate
-            break
-    if data_sheet is None:
-        data_sheet = sheets[0]
-
-    df = pd.read_excel(xls, data_sheet)
-
-    # 2) Optional system prompt sheet
-    system_text = ""
-    if "System Prompt" in sheets:
-        df_sys = pd.read_excel(xls, "System Prompt")
-        col = df_sys.columns[0]
-        system_text = "\n".join(df_sys[col].dropna().astype(str).tolist())
-
-    # 3) Optional sample questions sheet
-    sample_questions: List[str] = []
-    if "Questions" in sheets:
-        df_q = pd.read_excel(xls, "Questions")
-        col = df_q.columns[0]
-        sample_questions = df_q[col].dropna().astype(str).tolist()
-
-    return df, system_text, sample_questions
-
-
-# ===================================================
-# SCHEMA & PROMPTS
-# ===================================================
-
-SCHEMA_HINTS = """
-You are analysing call-centre support tickets stored in a tabular dataset.
-
-Typical columns and their meanings (if they exist):
-
-- Ticket_Number: unique ID of the ticket.
-- Subject: short category or subject line for the issue.
-- Description: longer free-text description of the issue.
-- Caller: name of the end user who reported the problem.
-- Status: current state of the ticket (e.g. Open, In Progress, Resolved).
-- Created_Date: when the ticket was created.
-- Due_Date: SLA target date/time for resolution.
-- Resolved_Date: when the ticket was actually resolved.
-- Resolved_By: name of the agent who resolved the ticket.
-- Resolution_Time_Seconds: numeric resolution time between creation and resolution.
-- SLA_Met: boolean or flag indicating whether the ticket met SLA.
-
-You must infer semantics from column names. For example:
-- Questions about “who called in the most” -> group by Caller.
-- Questions about “which agent is fastest / slowest on average” -> group by Resolved_By
-  using Resolution_Time_Seconds, considering only rows where that value is present.
-- SLA questions -> use SLA_Met if present; otherwise compare Resolved_Date > Due_Date.
-"""
-
-
-CODE_PROMPT = """
-You are a senior Python data analyst.
-
-You are given a Pandas DataFrame named `df` that contains call-centre tickets.
-You must write Python code that uses ONLY this DataFrame and standard Python / pandas
-to answer the user’s question.
-
-CRITICAL RULES:
-- You MUST define a variable named `result` at the end of your code.
-- `result` MUST be a dict with at least these keys:
-
-  result = {
-      "answer": <short natural-language answer string>,
-      "details": <underlying structured data used for the answer>,
-      "mode": <short tag such as "max", "min", "count", "share", "sla", "trend", "outlier", "overview", or "error">
-  }
-
-- `result["answer"]`:
-    * MUST be a short, business-friendly natural-language answer (1–3 sentences).
-    * It should directly answer the user’s question and include key numeric values
-      (e.g. counts or times in seconds).
-    * If there are ties for “max”/“min” style questions (e.g. multiple agents
-      share the slowest average time), include all relevant names in the answer.
-
-- `result["details"]`:
-    * SHOULD contain the data you used to compute the answer:
-        - lists of dicts for tickets, agents, subjects, etc.
-        - numeric metrics like counts, averages, percentages.
-    * Use only JSON-serialisable types: dict, list, str, int, float, bool, None.
-      Do NOT include pandas objects (Series/DataFrame), timestamps, or numpy types
-      in `result["details"]`. Convert them to plain Python types or strings.
-
-- `result["mode"]`:
-    * A short string label describing the type of analysis, such as:
-      "max", "min", "count", "share", "sla", "trend", "outlier", "overview", or "error".
-
-GENERAL BEHAVIOUR:
-- Use the column names in `df.columns` together with the hints you are given
-  about typical schema names.
-- For questions about “most common subject” or “which subject takes longest”,
-  group by a column named like "Subject" (case-sensitive check against df.columns).
-- For questions about “who submits the most tickets”, group by a column named like "Caller".
-- For questions about “who resolves tickets fastest/slowest”, group by a column
-  like "Resolved_By" (or any similar name present in df.columns) and use
-  Resolution_Time_Seconds for averages.
-- For “outside SLA” or “SLA breaches” questions:
-    * Prefer column SLA_Met if it exists.
-      - Treat True/"yes"/1 as met, False/"no"/0 as not met.
-    * If SLA_Met does not exist, and both Due_Date and Resolved_Date exist,
-      treat rows where Resolved_Date > Due_Date as outside SLA.
-
-CONSTRAINTS:
-- Do NOT print anything.
-- Do NOT import any modules.
-- Do NOT create plots.
-- Do NOT add comments.
-- Do NOT touch or modify global variables.
-- Your code must be fully executable as-is and end with a variable named `result`.
-- If the question truly cannot be answered from the data, set:
-
-  result = {
-      "answer": "I don't know.",
-      "details": {"reason": "explain briefly why this cannot be computed from the available columns."},
-      "mode": "error"
-  }
-"""
-
-
-def generate_code(question: str, df: pd.DataFrame, system_text: str) -> str:
+    No caching on purpose to avoid stale BlockData.
+    Always reads either the uploaded file or Demo Data.xlsx fresh.
     """
-    Ask the LLM to write Python code that:
-    - Uses df
-    - Computes an answer
-    - Populates result = {answer, details, mode}
-    """
-
-    cols = list(df.columns)
-
-    prompt = f"""
-{CODE_PROMPT}
-
-Additional schema hints:
-{SCHEMA_HINTS}
-
-Dataset columns:
-{cols}
-
-System prompt text (if any):
-{system_text}
-
-User question:
-{question}
-
-Write ONLY executable Python code. No backticks, no markdown, no comments.
-"""
-
-    code = llm.invoke(prompt).content.strip()
-    # Defensive cleanup in case the model adds fences
-    code = code.replace("```python", "").replace("```", "").strip()
-    return code
+    if file_bytes:
+        return load_excel(io.BytesIO(file_bytes))
+    return load_excel(default_path)
 
 
-# ===================================================
-# EXECUTE GENERATED CODE
-# ===================================================
+df_data = None
+system_text = ""
+sample_questions = []
+data_loaded = False
+active_source_label = ""
 
-def execute_code(df: pd.DataFrame, code: str) -> Any:
-    """
-    Execute the generated Python code with df in scope.
-    Expect a dict named `result` at the end.
-    """
-    local_scope: dict[str, Any] = {"df": df.copy(), "result": None}
+if uploaded_file:
     try:
-        exec(code, {}, local_scope)
-        result = local_scope.get("result", None)
-        return result
+        df_data, system_text, sample_questions = load_source(uploaded_file.read())
+        data_loaded = True
+        active_source_label = f"Uploaded file: {uploaded_file.name}"
+        st.sidebar.success("Dataset loaded successfully.")
     except Exception as e:
-        return {
-            "answer": "I don't know.",
-            "details": {"reason": f"Error executing generated code: {e}"},
-            "mode": "error",
-        }
+        st.sidebar.error(f"Error loading file: {e}")
+
+elif default_path.exists():
+    try:
+        df_data, system_text, sample_questions = load_source(None)
+        data_loaded = True
+        active_source_label = "Default: Demo Data.xlsx"
+        st.sidebar.info("Using default dataset: Demo Data.xlsx")
+    except Exception as e:
+        st.sidebar.error(f"Error loading default dataset: {e}")
 
 
-# ===================================================
-# MAIN ENTRYPOINT USED BY STREAMLIT
-# ===================================================
+if data_loaded:
+    st.sidebar.caption(f"📂 Active dataset: {active_source_label}")
 
-def ask_question(agent_unused, question: str, system_text: str, df=None) -> str:
+
+# =====================================================
+# Helper Functions
+# =====================================================
+
+def human_time(seconds):
+    if pd.isna(seconds):
+        return "N/A"
+    seconds = float(seconds)
+    hours = seconds / 3600
+    days = seconds / 86400
+    return f"{int(seconds):,} sec ({hours:.1f} hrs / {days:.1f} days)"
+
+
+def compute_stats(df: pd.DataFrame):
     """
-    Main function used by the Streamlit app.
-
-    Returns a single natural-language answer string that can be rendered directly.
+    Quick Stats for the Demo Data schema:
+      - Ticket_Number, Subject, Description, Caller, Status
+      - Created_Date, Due_Date, Resolved_Date, Resolved_By
+      - Resolution_Time_Seconds, SLA_Met
     """
-    if df is None:
-        return "Dataset not loaded."
+    stats = {
+        "total": len(df),
+        "avg": "N/A",
+        "min": "N/A",
+        "max": "N/A",
+        "fastest_agent": "N/A",
+        "slowest_agent": "N/A",
+        "sla_rate": None,
+        "outside_sla": None,
+    }
 
-    # 1) LLM generates analysis code
-    code = generate_code(question, df, system_text)
+    # --- Resolution time stats ---
+    if "Resolution_Time_Seconds" in df.columns:
+        rt = pd.to_numeric(df["Resolution_Time_Seconds"], errors="coerce").dropna()
+        if len(rt) > 0:
+            stats["avg"] = human_time(rt.mean())
+            stats["min"] = human_time(rt.min())
+            stats["max"] = human_time(rt.max())
 
-    # 2) Execute the code on the actual df
-    result = execute_code(df, code)
+    # --- Agent performance (fastest/slowest avg resolution) ---
+    if "Resolved_By" in df.columns and "Resolution_Time_Seconds" in df.columns:
+        df_agents = df.dropna(subset=["Resolved_By", "Resolution_Time_Seconds"]).copy()
+        df_agents["Resolution_Time_Seconds"] = pd.to_numeric(
+            df_agents["Resolution_Time_Seconds"], errors="coerce"
+        )
+        df_agents = df_agents.dropna(subset=["Resolution_Time_Seconds"])
 
-    # 3) Normalise result into a dict
-    if not isinstance(result, dict):
-        result = {
-            "answer": str(result),
-            "details": {"note": "Result was not a dict; converted to string."},
-            "mode": "raw",
-        }
+        if not df_agents.empty:
+            grouped = df_agents.groupby("Resolved_By")["Resolution_Time_Seconds"].mean()
 
-    answer_text = str(result.get("answer", "")).strip()
-    if not answer_text:
-        answer_text = "I don't know."
+            if len(grouped) > 0:
+                # fastest
+                fast_val = grouped.min()
+                fast_names = list(grouped[grouped == fast_val].index)
+                # slowest
+                slow_val = grouped.max()
+                slow_names = list(grouped[grouped == slow_val].index)
 
-    return answer_text
+                def format_agents(names, seconds_value):
+                    label_time = human_time(seconds_value)
+                    if not names:
+                        return "N/A"
+                    if len(names) == 1:
+                        return f"{names[0]} ({label_time})"
+                    if len(names) == 2:
+                        return f"{names[0]} & {names[1]} ({label_time})"
+                    return f"{', '.join(names[:2])} + {len(names)-2} others ({label_time})"
+
+                stats["fastest_agent"] = format_agents(fast_names, fast_val)
+                stats["slowest_agent"] = format_agents(slow_names, slow_val)
+
+    # --- SLA using SLA_Met boolean/yes-no ---
+    if "SLA_Met" in df.columns:
+        sla_series = df["SLA_Met"].dropna()
+        total_sla = len(sla_series)
+        if total_sla > 0:
+            # handle True/False or strings like "Yes"/"No"
+            normalized = sla_series.astype(str).str.lower()
+            met_mask = normalized.isin(["true", "yes", "y", "1"])
+            met_count = int(met_mask.sum())
+            not_met = total_sla - met_count
+            stats["sla_rate"] = met_count / total_sla * 100
+            stats["outside_sla"] = not_met
+
+    return stats
 
 
-def build_agent(df, system_text):
-    """
-    Kept for compatibility with the existing app structure.
-    We don't need a complex agent object; df itself is enough.
-    """
-    return df
+# =====================================================
+# Main Layout
+# =====================================================
+
+if data_loaded and df_data is not None:
+
+    left_col, right_col = st.columns([2.7, 1.3])
+
+    # LEFT SIDE — Ask MILOlytics
+    with left_col:
+
+        st.subheader("Ask MILOlytics a Question")
+
+        user_q = st.text_input(
+            "Your Question",
+            placeholder="Example: Which ticket took the longest to resolve?",
+        )
+
+        if st.button("Submit Question"):
+            if not user_q.strip():
+                st.error("Please enter a question.")
+            else:
+                with st.spinner("Analyzing dataset..."):
+                    agent = build_agent(df_data, system_text)
+                    answer = ask_question(agent, user_q, system_text, df_data)
+
+                st.markdown(
+                    f"""
+<div class='answer-box'>
+{answer}
+</div>
+""",
+                    unsafe_allow_html=True,
+                )
+
+    # RIGHT SIDE — Quick Stats
+    with right_col:
+
+        st.subheader("📊 Quick Stats")
+
+        stats = compute_stats(df_data)
+
+        st.markdown(
+            f"""
+<div class='stats-box'>
+<b>Total Tickets:</b> {stats['total']}
+</div>
+""",
+            unsafe_allow_html=True,
+        )
+
+        st.markdown(
+            f"""
+<div class='stats-box'>
+<b>Avg Resolution:</b> {stats['avg']}<br>
+<b>Fastest Ticket:</b> {stats['min']}<br>
+<b>Slowest Ticket:</b> {stats['max']}
+</div>
+""",
+            unsafe_allow_html=True,
+        )
+
+        st.markdown(
+            f"""
+<div class='stats-box'>
+<b>Fastest Agent:</b> {stats['fastest_agent']}<br>
+<b>Slowest Agent:</b> {stats['slowest_agent']}
+</div>
+""",
+            unsafe_allow_html=True,
+        )
+
+        if stats.get("sla_rate") is not None:
+            st.markdown(
+                f"""
+<div class='stats-box'>
+<b>SLA Compliance:</b> {stats['sla_rate']:.1f}%<br>
+<b>Outside SLA:</b> {stats['outside_sla']}
+</div>
+""",
+                unsafe_allow_html=True,
+            )
+
+else:
+    st.info("Upload a dataset using the sidebar to get started.")
