@@ -171,6 +171,7 @@ uploaded_file = st.sidebar.file_uploader(
     type=["xlsx"],
 )
 
+# Make sure this file actually exists in /data in your repo
 default_path = Path("data/Demo Data.xlsx")
 
 
@@ -185,7 +186,6 @@ df_data = None
 system_text = ""
 sample_questions = []
 data_loaded = False
-
 
 if uploaded_file:
     try:
@@ -217,46 +217,97 @@ def human_time(seconds):
     return f"{int(seconds):,} sec ({hours:.1f} hrs / {days:.1f} days)"
 
 
+def pick_first_existing_column(df: pd.DataFrame, candidates):
+    """Return the first column name that exists in df, or None."""
+    for c in candidates:
+        if c in df.columns:
+            return c
+    return None
+
+
+def format_agent_group(names, seconds_value):
+    """Pretty-print fastest/slowest agents, with ties handled nicely."""
+    if not names:
+        return "N/A"
+    label_time = human_time(seconds_value)
+    if len(names) == 1:
+        return f"{names[0]} ({label_time})"
+    if len(names) == 2:
+        return f"{names[0]} & {names[1]} ({label_time})"
+    return f"{', '.join(names[:2])} + {len(names)-2} others ({label_time})"
+
+
 def compute_stats(df: pd.DataFrame):
-    stats = {}
+    """
+    Quick Stats aligned with Demo Data and the agent:
+    - Flexible on column names (e.g. Resolution_Time_Seconds vs Resolution_TimeSeconds)
+    - Uses Resolved_By or Agent for performance
+    - Uses SLA_Met, with date-based fallback
+    """
+    stats = {
+        "total": len(df),
+        "avg": "N/A",
+        "min": "N/A",
+        "max": "N/A",
+        "fastest_agent": "N/A",
+        "slowest_agent": "N/A",
+        "sla_rate": None,
+        "outside_sla": None,
+    }
 
-    # --- Total Tickets ---
-    stats["total"] = len(df)
-
-    # --- Resolution Time ---
-    if "Resolution_TimeSeconds" in df.columns:
-        rt = pd.to_numeric(df["Resolution_TimeSeconds"], errors="coerce").dropna()
+    # --- Resolution time column detection ---
+    rt_col = pick_first_existing_column(
+        df,
+        ["Resolution_Time_Seconds", "Resolution_TimeSeconds", "Resolution Time Seconds"],
+    )
+    if rt_col:
+        rt = pd.to_numeric(df[rt_col], errors="coerce").dropna()
         if len(rt) > 0:
             stats["avg"] = human_time(rt.mean())
             stats["min"] = human_time(rt.min())
             stats["max"] = human_time(rt.max())
-        else:
-            stats["avg"] = stats["min"] = stats["max"] = "N/A"
 
-    # --- Fastest / Slowest Agent ---
-    if "Agent" in df.columns and "Resolution_TimeSeconds" in df.columns:
-        df2 = df.dropna(subset=["Agent", "Resolution_TimeSeconds"])
-        if len(df2) > 0:
-            grouped = df2.groupby("Agent")["Resolution_TimeSeconds"].mean()
+    # --- Agent performance (fastest / slowest) ---
+    agent_col = pick_first_existing_column(
+        df,
+        ["Resolved_By", "Agent", "Resolved By"],
+    )
+    if agent_col and rt_col:
+        df_agents = df.dropna(subset=[agent_col, rt_col]).copy()
+        df_agents[rt_col] = pd.to_numeric(df_agents[rt_col], errors="coerce")
+        df_agents = df_agents.dropna(subset=[rt_col])
+        if not df_agents.empty:
+            grouped = df_agents.groupby(agent_col)[rt_col].mean()
+            if len(grouped) > 0:
+                min_val = grouped.min()
+                max_val = grouped.max()
+                fastest_names = list(grouped[grouped == min_val].index)
+                slowest_names = list(grouped[grouped == max_val].index)
+                stats["fastest_agent"] = format_agent_group(fastest_names, min_val)
+                stats["slowest_agent"] = format_agent_group(slowest_names, max_val)
 
-            fast_agent = grouped.idxmin()
-            slow_agent = grouped.idxmax()
+    # --- SLA from SLA_Met if present ---
+    sla_col = pick_first_existing_column(df, ["SLA_Met", "SLA Met", "SLA"])
+    if sla_col:
+        sla_series = df[sla_col].dropna().astype(str).str.lower()
+        total_sla = len(sla_series)
+        if total_sla > 0:
+            met_mask = sla_series.isin(["yes", "y", "true", "1"])
+            met_count = int(met_mask.sum())
+            not_met = total_sla - met_count
+            stats["sla_rate"] = met_count / total_sla * 100
+            stats["outside_sla"] = not_met
 
-            stats["fastest_agent"] = f"{fast_agent} ({human_time(grouped.min())})"
-            stats["slowest_agent"] = f"{slow_agent} ({human_time(grouped.max())})"
-        else:
-            stats["fastest_agent"] = stats["slowest_agent"] = "N/A"
-
-    # --- SLA Compliance ---
-    if "SLA_Met" in df.columns:
-        total_resolved = df["SLA_Met"].notna().sum()
-        if total_resolved > 0:
-            sla_yes = (df["SLA_Met"].astype(str).str.lower() == "yes").sum()
-            stats["sla_rate"] = (sla_yes / total_resolved) * 100
-            stats["outside_sla"] = total_resolved - sla_yes
-        else:
-            stats["sla_rate"] = None
-            stats["outside_sla"] = None
+    # --- Date-based SLA fallback (if SLA_Met not usable) ---
+    if stats["sla_rate"] is None:
+        due_col = pick_first_existing_column(df, ["Due_Date", "Due Date"])
+        res_col = pick_first_existing_column(df, ["Resolved_Date", "Resolved Date"])
+        if due_col and res_col:
+            valid = df.dropna(subset=[due_col, res_col])
+            if len(valid) > 0:
+                late = (valid[res_col] > valid[due_col]).sum()
+                stats["sla_rate"] = 100 - (late / len(valid) * 100)
+                stats["outside_sla"] = late
 
     return stats
 
@@ -269,7 +320,7 @@ if data_loaded and df_data is not None:
 
     left_col, right_col = st.columns([2.7, 1.3])
 
-    # LEFT SIDE — Ask Questions
+    # LEFT SIDE — Ask MILOlytics
     with left_col:
 
         st.subheader("Ask MILOlytics a Question")
@@ -287,11 +338,14 @@ if data_loaded and df_data is not None:
                     agent = build_agent(df_data, system_text)
                     answer = ask_question(agent, user_q, system_text, df_data)
 
-                st.markdown(f"""
+                st.markdown(
+                    f"""
 <div class='answer-box'>
 {answer}
 </div>
-""", unsafe_allow_html=True)
+""",
+                    unsafe_allow_html=True,
+                )
 
     # RIGHT SIDE — Quick Stats
     with right_col:
@@ -300,34 +354,46 @@ if data_loaded and df_data is not None:
 
         stats = compute_stats(df_data)
 
-        st.markdown(f"""
+        st.markdown(
+            f"""
 <div class='stats-box'>
 <b>Total Tickets:</b> {stats['total']}
 </div>
-""", unsafe_allow_html=True)
+""",
+            unsafe_allow_html=True,
+        )
 
-        st.markdown(f"""
+        st.markdown(
+            f"""
 <div class='stats-box'>
 <b>Avg Resolution:</b> {stats['avg']}<br>
 <b>Fastest Ticket:</b> {stats['min']}<br>
 <b>Slowest Ticket:</b> {stats['max']}
 </div>
-""", unsafe_allow_html=True)
+""",
+            unsafe_allow_html=True,
+        )
 
-        st.markdown(f"""
+        st.markdown(
+            f"""
 <div class='stats-box'>
 <b>Fastest Agent:</b> {stats['fastest_agent']}<br>
 <b>Slowest Agent:</b> {stats['slowest_agent']}
 </div>
-""", unsafe_allow_html=True)
+""",
+            unsafe_allow_html=True,
+        )
 
         if stats.get("sla_rate") is not None:
-            st.markdown(f"""
+            st.markdown(
+                f"""
 <div class='stats-box'>
 <b>SLA Compliance:</b> {stats['sla_rate']:.1f}%<br>
 <b>Outside SLA:</b> {stats['outside_sla']}
 </div>
-""", unsafe_allow_html=True)
+""",
+                unsafe_allow_html=True,
+            )
 
 else:
     st.info("Upload a dataset using the sidebar to get started.")
