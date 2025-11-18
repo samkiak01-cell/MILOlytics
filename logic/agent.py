@@ -21,16 +21,29 @@ llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
 def load_excel(
     source: Union[str, Path, IO[bytes]]
 ) -> Tuple[pd.DataFrame, str, List[str]]:
+    """
+    Load the Excel file and return:
+      - df: main ticket dataset from 'Data' sheet
+      - system_text: text from 'System Prompt' (if present)
+      - sample_questions: from 'Questions' sheet (if present)
+
+    Expects the demo schema columns:
+      Ticket_Number, Subject, Description, Caller, Status,
+      Created_Date, Due_Date, Resolved_Date, Resolved_By,
+      Resolution_Time_Seconds, SLA_Met
+    """
     xls = pd.ExcelFile(source)
     sheets = xls.sheet_names
 
     if "Data" not in sheets:
+        # Fallback: use first sheet if 'Data' not found
         main_sheet = sheets[0]
     else:
         main_sheet = "Data"
 
     df = pd.read_excel(xls, main_sheet)
 
+    # Optional system prompt sheet
     if "System Prompt" in sheets:
         df_sys = pd.read_excel(xls, "System Prompt")
         col = df_sys.columns[0]
@@ -38,6 +51,7 @@ def load_excel(
     else:
         system_text = ""
 
+    # Optional questions sheet
     if "Questions" in sheets:
         df_q = pd.read_excel(xls, "Questions")
         col = df_q.columns[0]
@@ -45,6 +59,7 @@ def load_excel(
     else:
         sample_questions = []
 
+    # Ensure expected columns exist so analytics don’t crash
     expected_cols = [
         "Ticket_Number",
         "Subject",
@@ -62,6 +77,7 @@ def load_excel(
         if col not in df.columns:
             df[col] = None
 
+    # Normalize date columns to datetime where possible
     for col in ["Created_Date", "Due_Date", "Resolved_Date"]:
         if col in df.columns:
             df[col] = pd.to_datetime(df[col], errors="coerce")
@@ -70,62 +86,72 @@ def load_excel(
 
 
 # ============================================================
-# COLUMN SEMANTICS
+# COLUMN SEMANTICS (for LLM context)
 # ============================================================
 
 COLUMN_SEMANTICS = """
 This dataset represents call center tickets.
 
-Columns and meanings:
+Columns and meanings (Demo schema):
 - Ticket_Number: ID of the ticket.
-- Subject: high-level issue category. Do NOT invent new categories.
+- Subject: high-level issue category for the ticket. Do NOT invent new categories.
 - Description: free-text explanation of the issue.
-- Caller: person who reported the problem.
-- Status: current state of the ticket.
+- Caller: person who called in and reported the problem.
+- Status: current state of the ticket (Open, In Progress, Resolved, etc.).
 - Created_Date: timestamp when the ticket was created.
-- Due_Date: SLA target deadline.
-- Resolved_Date: timestamp when the ticket was resolved.
-- Resolved_By: agent responsible for resolving it.
-- Resolution_Time_Seconds: numeric duration to resolve.
-- SLA_Met: True/False indicator of SLA compliance.
+- Due_Date: SLA target date/time.
+- Resolved_Date: timestamp when the ticket was resolved (if resolved).
+- Resolved_By: call center agent who resolved the ticket.
+- Resolution_Time_Seconds: numeric resolution time in seconds.
+- SLA_Met: whether the ticket met SLA (True/False, Yes/No, 1/0).
 
-Rules:
-- Ticket volume -> group by Caller.
-- Agent speed -> group by Resolved_By using mean Resolution_Time_Seconds.
-- Longest/shortest -> max/min Resolution_Time_Seconds.
-- SLA -> use SLA_Met when available.
-- Do NOT merge or invent subject categories.
-- Trend analysis uses Created_Date-based time buckets.
+Key rules:
+- "Who submits the most tickets" or "who called in the most" -> group by Caller.
+- "Which agent resolves tickets fastest/slowest" -> group by Resolved_By
+  using average Resolution_Time_Seconds on resolved tickets.
+- "Which ticket took the longest/shortest" -> use max/min Resolution_Time_Seconds.
+- "Outside SLA" or "SLA breaches":
+    * Prefer SLA_Met if present: False/0/"no" => outside SLA; True/1/"yes" => within SLA.
+    * If SLA_Met missing but Due_Date and Resolved_Date present, treat
+      Resolved_Date > Due_Date as outside SLA.
+- "Most common subject" -> group by Subject exactly as given; do NOT merge categories.
+- "Subjects with longest average resolution time" -> group by Subject + mean Resolution_Time_Seconds.
+- Outliers: tickets with unusually long Resolution_Time_Seconds vs the rest.
+- Trend/forecast:
+    * Use Created_Date to group by date.
+    * For each date: ticket volume, average resolution time, SLA breach rate.
+    * Trends are based on early vs late periods.
+    * Forecast is a naive extrapolation of recent changes.
 """
 
 
 # ============================================================
-# INTENT CLASSIFICATION
+# INTENT CLASSIFICATION (Layer 1)
 # ============================================================
 
 INTENT_PROMPT = """
 You classify user questions about a call center ticket dataset.
 
-Choose EXACTLY one intent label:
+Given the question, choose ONE of these intent labels:
 
-overview
-count
-top_subjects
-top_callers
-ticket_duration_extreme
-agent_performance
-sla_summary
-sla_by_agent
-subject_resolution
-outlier_tickets
-trend
-forecast
-executive_summary
-recommendations
-workflow_focus
-other
+- "overview"            -> general understanding ("overview", "what stands out")
+- "count"               -> "how many" questions
+- "top_subjects"        -> which subjects appear most / main subjects
+- "top_callers"         -> who calls in the most, high ticket volume callers
+- "ticket_duration_extreme" -> longest or shortest ticket questions
+- "agent_performance"   -> fastest/slowest agents, average resolution per agent
+- "sla_summary"         -> how many outside SLA, SLA rate overall
+- "sla_by_agent"        -> who is best/worst at meeting SLA
+- "subject_resolution"  -> subjects with longest or shortest average resolution time
+- "outlier_tickets"     -> unusual or risky tickets, outliers
+- "trend"               -> patterns over time, trends in resolution times or SLA
+- "forecast"            -> future projection of resolution time or SLA compliance
+- "executive_summary"   -> high-level summary for executives
+- "recommendations"     -> what to improve, suggestions, next steps
+- "workflow_focus"      -> which part of the workflow needs attention
+- "other"               -> anything else
 
-Return ONLY the label.
+Return ONLY the label, nothing else.
 """
 
 ALLOWED_INTENTS = {
@@ -140,67 +166,92 @@ ALLOWED_INTENTS = {
 def classify_intent(question: str) -> str:
     q = question.lower()
 
-    if any(k in q for k in ["pattern", "patterns", "trend", "trends"]):
+    # --- Hard rules FIRST for stability ---
+    trend_keywords = ["pattern", "patterns", "trend", "trends"]
+    if any(k in q for k in trend_keywords):
         return "trend"
-    if any(k in q for k in ["forecast", "predict", "future"]):
+
+    forecast_keywords = ["forecast", "predict", "projection", "future", "expected"]
+    if any(k in q for k in forecast_keywords):
         return "forecast"
 
+    # LLM fallback
     msg = f"{INTENT_PROMPT}\n\nQuestion:\n{question}\n\nIntent label:"
     intent = llm.invoke(msg).content.strip().lower()
-    return intent if intent in ALLOWED_INTENTS else "other"
+    if intent not in ALLOWED_INTENTS:
+        return "other"
+    return intent
 
 
 # ============================================================
-# HELPERS
+# HELPER FUNCTIONS FOR ANALYTICS (Layer 2 base)
 # ============================================================
 
 def normalize_sla(series: pd.Series) -> pd.Series:
-    s = series.astype(str).str.strip().str.lower()
-    true_vals = {"true", "yes", "1", "y"}
-    false_vals = {"false", "no", "0", "n"}
+    """Convert SLA_Met column to boolean True/False, safely."""
+    if series is None:
+        return pd.Series(dtype=bool)
 
-    def to_bool(x):
-        if x in true_vals: return True
-        if x in false_vals: return False
+    s = series.astype(str).str.strip().str.lower()
+    true_vals = {"true", "yes", "y", "1"}
+    false_vals = {"false", "no", "n", "0"}
+
+    def to_bool(x: str) -> Any:
+        if x in true_vals:
+            return True
+        if x in false_vals:
+            return False
         return None
 
     return s.map(to_bool)
 
 
-def human_time(seconds):
+def human_time(seconds: float | None) -> str:
     if seconds is None:
         return "N/A"
     try:
         seconds = float(seconds)
-    except:
+    except Exception:
         return "N/A"
-    hours = seconds / 3600
-    days = seconds / 86400
+    hours = seconds / 3600.0
+    days = seconds / 86400.0
     if days >= 1:
         return f"{int(seconds):,} sec (~{hours:.1f} hrs / {days:.1f} days)"
-    if hours >= 1:
+    elif hours >= 1:
         return f"{int(seconds):,} sec (~{hours:.1f} hrs)"
-    return f"{int(seconds):,} sec (~{seconds/60:.1f} min)"
+    else:
+        return f"{int(seconds):,} sec (~{seconds/60.0:.1f} min)"
 
 
-def to_datetime_safe(series: pd.Series):
+def to_datetime_safe(series: pd.Series) -> pd.Series:
     return pd.to_datetime(series, errors="coerce")
 
 
 # ============================================================
-# ANALYTIC FUNCTIONS (DETERMINISTIC)
+# ANALYTIC FUNCTIONS PER INTENT (Layer 2)
 # ============================================================
 
-def analyze_overview(df):
+def analyze_overview(df: pd.DataFrame) -> Dict[str, Any]:
     total = len(df)
+
     rt = df["Resolution_Time_Seconds"]
     avg_rt = float(rt.dropna().mean()) if rt.notna().any() else None
 
     sla_bool = normalize_sla(df["SLA_Met"])
-    compliance = float((sla_bool == True).mean() * 100) if sla_bool.notna().any() else None
+    if sla_bool.notna().any():
+        valid = sla_bool.dropna()
+        compliance = float((valid == True).mean() * 100.0)
+    else:
+        compliance = None
 
-    subj_counts = df["Subject"].dropna().value_counts().head(5).reset_index()
-    subj_counts.columns = ["Subject", "Count"]
+    subj_counts = (
+        df["Subject"].dropna()
+        .value_counts()
+        .head(5)
+        .reset_index()
+        .rename(columns={"index": "Subject", "Subject": "Count"})
+        .to_dict(orient="records")
+    )
 
     return {
         "intent": "overview",
@@ -209,70 +260,90 @@ def analyze_overview(df):
             "avg_resolution_seconds": avg_rt,
             "sla_compliance_percent": compliance,
         },
-        "top_subjects": subj_counts.to_dict(orient="records"),
+        "top_subjects": subj_counts,
     }
 
 
-def analyze_count(question, df):
+def analyze_count(question: str, df: pd.DataFrame) -> Dict[str, Any]:
     q = question.lower()
     sla_bool = normalize_sla(df["SLA_Met"])
 
-    if "outside sla" in q or "breach" in q:
+    if "outside sla" in q or "breach" in q or "breaches" in q:
         valid = sla_bool.dropna()
         breaches = int((valid == False).sum())
+        total = int(len(valid))
         return {
             "intent": "count",
             "type": "outside_sla",
-            "total_with_sla": len(valid),
+            "total_with_sla": total,
             "breaches": breaches,
         }
+    else:
+        total = int(len(df))
+        return {
+            "intent": "count",
+            "type": "tickets",
+            "total_tickets": total,
+        }
 
-    return {
-        "intent": "count",
-        "type": "tickets",
-        "total_tickets": len(df),
-    }
 
-
-def analyze_top_subjects(df):
-    records = df["Subject"].dropna().value_counts().reset_index()
-    records.columns = ["Subject", "Count"]
+def analyze_top_subjects(df: pd.DataFrame) -> Dict[str, Any]:
+    counts = (
+        df["Subject"].dropna()
+        .value_counts()
+        .reset_index()
+        .rename(columns={"index": "Subject", "Subject": "Count"})
+    )
+    records = counts.to_dict(orient="records")
     return {
         "intent": "top_subjects",
-        "subjects": records.to_dict(orient="records"),
+        "subjects": records,
     }
 
 
-def analyze_top_callers(df):
-    records = df["Caller"].dropna().value_counts().reset_index()
-    records.columns = ["Caller", "Count"]
+def analyze_top_callers(df: pd.DataFrame) -> Dict[str, Any]:
+    counts = (
+        df["Caller"].dropna()
+        .value_counts()
+        .reset_index()
+        .rename(columns={"index": "Caller", "Caller": "Count"})
+    )
+    records = counts.to_dict(orient="records")
     return {
         "intent": "top_callers",
-        "callers": records.to_dict(orient="records"),
+        "callers": records,
     }
 
 
-def analyze_ticket_duration_extreme(question, df):
+def analyze_ticket_duration_extreme(question: str, df: pd.DataFrame) -> Dict[str, Any]:
     q = question.lower()
     rt = df["Resolution_Time_Seconds"].dropna()
     if rt.empty:
-        return {"intent": "ticket_duration_extreme", "tickets": [], "kind": "none"}
+        return {
+            "intent": "ticket_duration_extreme",
+            "tickets": [],
+            "kind": "none",
+        }
 
-    extreme_val = rt.min() if "shortest" in q else rt.max()
-    kind = "shortest" if "shortest" in q else "longest"
+    if "shortest" in q or "fastest" in q:
+        extreme_val = rt.min()
+        kind = "shortest"
+    else:
+        extreme_val = rt.max()
+        kind = "longest"
 
     subset = df[df["Resolution_Time_Seconds"] == extreme_val]
 
     tickets = []
     for _, row in subset.iterrows():
         tickets.append({
-            "Ticket_Number": str(row["Ticket_Number"]),
-            "Subject": str(row["Subject"]),
-            "Description": str(row["Description"]),
-            "Caller": str(row["Caller"]),
-            "Resolved_By": str(row["Resolved_By"]),
-            "Resolution_Time_Seconds": float(row["Resolution_Time_Seconds"]),
-            "SLA_Met": str(row["SLA_Met"]),
+            "Ticket_Number": str(row.get("Ticket_Number")),
+            "Subject": str(row.get("Subject")),
+            "Description": str(row.get("Description")),
+            "Caller": str(row.get("Caller")),
+            "Resolved_By": str(row.get("Resolved_By")),
+            "Resolution_Time_Seconds": float(row.get("Resolution_Time_Seconds")),
+            "SLA_Met": str(row.get("SLA_Met")),
         })
 
     return {
@@ -283,38 +354,51 @@ def analyze_ticket_duration_extreme(question, df):
     }
 
 
-def analyze_agent_performance(df):
+def analyze_agent_performance(df: pd.DataFrame) -> Dict[str, Any]:
     df_res = df.dropna(subset=["Resolved_By", "Resolution_Time_Seconds"])
     if df_res.empty:
-        return {"intent": "agent_performance", "fastest": [], "slowest": []}
+        return {
+            "intent": "agent_performance",
+            "fastest": [],
+            "slowest": [],
+        }
 
     grouped = df_res.groupby("Resolved_By")["Resolution_Time_Seconds"].mean().sort_values()
     fastest_val = float(grouped.iloc[0])
     slowest_val = float(grouped.iloc[-1])
+    fastest_agents = grouped[grouped == fastest_val].index.tolist()
+    slowest_agents = grouped[grouped == slowest_val].index.tolist()
+
+    gap = slowest_val - fastest_val
 
     return {
         "intent": "agent_performance",
         "fastest": [
             {"Resolved_By": a, "avg_resolution_seconds": fastest_val}
-            for a in grouped[grouped == fastest_val].index.tolist()
+            for a in fastest_agents
         ],
         "slowest": [
             {"Resolved_By": a, "avg_resolution_seconds": slowest_val}
-            for a in grouped[grouped == slowest_val].index.tolist()
+            for a in slowest_agents
         ],
-        "gap_seconds": slowest_val - fastest_val,
+        "gap_seconds": gap,
     }
 
 
-def analyze_sla_summary(df):
+def analyze_sla_summary(df: pd.DataFrame) -> Dict[str, Any]:
     sla_bool = normalize_sla(df["SLA_Met"])
     valid = sla_bool.dropna()
     if valid.empty:
-        return {"intent": "sla_summary", "has_data": False}
+        return {
+            "intent": "sla_summary",
+            "has_data": False,
+        }
 
-    total = len(valid)
+    total = int(len(valid))
     met = int((valid == True).sum())
     breaches = int((valid == False).sum())
+    compliance = met / total * 100.0
+    breach_pct = breaches / total * 100.0
 
     breached_tickets = df.loc[sla_bool == False, "Ticket_Number"].astype(str).tolist()
 
@@ -324,43 +408,49 @@ def analyze_sla_summary(df):
         "total_with_sla": total,
         "met_sla": met,
         "breached_sla": breaches,
-        "sla_compliance_percent": met / total * 100,
-        "outside_sla_percent": breaches / total * 100,
+        "sla_compliance_percent": compliance,
+        "outside_sla_percent": breach_pct,
         "breached_ticket_numbers": breached_tickets,
     }
 
 
-def analyze_sla_by_agent(df):
+def analyze_sla_by_agent(df: pd.DataFrame) -> Dict[str, Any]:
     sla_bool = normalize_sla(df["SLA_Met"])
     df2 = df.copy()
     df2["SLA_Bool"] = sla_bool
     df2 = df2.dropna(subset=["Resolved_By", "SLA_Bool"])
-
     if df2.empty:
-        return {"intent": "sla_by_agent", "best": [], "worst": []}
+        return {
+            "intent": "sla_by_agent",
+            "best": [],
+            "worst": [],
+        }
 
     grouped = df2.groupby("Resolved_By")["SLA_Bool"].mean().sort_values(ascending=False)
+    best_val = float(grouped.iloc[0]) * 100.0
+    worst_val = float(grouped.iloc[-1]) * 100.0
+    best_agents = grouped[grouped == grouped.iloc[0]].index.tolist()
+    worst_agents = grouped[grouped == grouped.iloc[-1]].index.tolist()
 
     return {
         "intent": "sla_by_agent",
-        "best": [
-            {"Resolved_By": a, "sla_compliance_percent": float(grouped.iloc[0]) * 100}
-            for a in grouped[grouped == grouped.iloc[0]].index.tolist()
-        ],
-        "worst": [
-            {"Resolved_By": a, "sla_compliance_percent": float(grouped.iloc[-1]) * 100}
-            for a in grouped[grouped == grouped.iloc[-1]].index.tolist()
-        ],
+        "best": [{"Resolved_By": a, "sla_compliance_percent": best_val} for a in best_agents],
+        "worst": [{"Resolved_By": a, "sla_compliance_percent": worst_val} for a in worst_agents],
     }
 
 
-def analyze_subject_resolution(df):
+def analyze_subject_resolution(df: pd.DataFrame) -> Dict[str, Any]:
     df2 = df.dropna(subset=["Subject", "Resolution_Time_Seconds"])
     if df2.empty:
-        return {"intent": "subject_resolution", "subjects_by_avg": [], "longest_subjects": []}
+        return {
+            "intent": "subject_resolution",
+            "subjects_by_avg": [],
+            "longest_subjects": [],
+        }
 
     grouped = df2.groupby("Subject")["Resolution_Time_Seconds"].mean().sort_values(ascending=False)
     longest_val = float(grouped.iloc[0])
+    longest_subjs = grouped[grouped == grouped.iloc[0]].index.tolist()
 
     return {
         "intent": "subject_resolution",
@@ -370,15 +460,19 @@ def analyze_subject_resolution(df):
         ],
         "longest_subjects": [
             {"Subject": subj, "avg_resolution_seconds": longest_val}
-            for subj in grouped[grouped == longest_val].index.tolist()
+            for subj in longest_subjs
         ],
     }
 
 
-def analyze_outlier_tickets(df):
+def analyze_outlier_tickets(df: pd.DataFrame) -> Dict[str, Any]:
     rt_series = df["Resolution_Time_Seconds"].dropna()
     if len(rt_series) < 5:
-        return {"intent": "outlier_tickets", "outlier_threshold_seconds": None, "outlier_tickets": []}
+        return {
+            "intent": "outlier_tickets",
+            "outlier_threshold_seconds": None,
+            "outlier_tickets": [],
+        }
 
     q1 = float(rt_series.quantile(0.25))
     q3 = float(rt_series.quantile(0.75))
@@ -391,13 +485,13 @@ def analyze_outlier_tickets(df):
     tickets = []
     for _, row in outliers.iterrows():
         tickets.append({
-            "Ticket_Number": str(row["Ticket_Number"]),
-            "Subject": str(row["Subject"]),
-            "Description": str(row["Description"]),
-            "Caller": str(row["Caller"]),
-            "Resolved_By": str(row["Resolved_By"]),
-            "Resolution_Time_Seconds": float(row["Resolution_Time_Seconds"]),
-            "SLA_Met": str(row["SLA_Met"]),
+            "Ticket_Number": str(row.get("Ticket_Number")),
+            "Subject": str(row.get("Subject")),
+            "Description": str(row.get("Description")),
+            "Caller": str(row.get("Caller")),
+            "Resolved_By": str(row.get("Resolved_By")),
+            "Resolution_Time_Seconds": float(row.get("Resolution_Time_Seconds")),
+            "SLA_Met": str(row.get("SLA_Met")),
         })
 
     return {
@@ -407,7 +501,8 @@ def analyze_outlier_tickets(df):
     }
 
 
-def build_time_buckets(df):
+def build_time_buckets(df: pd.DataFrame) -> List[Dict[str, Any]]:
+    """Group by Created_Date (date only) and compute per-day stats."""
     created = to_datetime_safe(df["Created_Date"])
     if created.isna().all():
         return []
@@ -419,137 +514,190 @@ def build_time_buckets(df):
 
     buckets = []
     for d, group in df2.groupby("Created_Date_DT"):
+        total = int(len(group))
         rt = group["Resolution_Time_Seconds"].dropna()
+        avg_rt = float(rt.mean()) if not rt.empty else None
+
         sla_sub = sla_bool.loc[group.index].dropna()
+        if not sla_sub.empty:
+            breaches = int((sla_sub == False).sum())
+            breach_rate = breaches / len(sla_sub) * 100.0
+        else:
+            breaches = None
+            breach_rate = None
 
         buckets.append({
             "date": str(d),
-            "total_tickets": len(group),
-            "avg_resolution_seconds": float(rt.mean()) if not rt.empty else None,
-            "sla_breach_percent": (sla_sub == False).mean() * 100 if not sla_sub.empty else None,
+            "total_tickets": total,
+            "avg_resolution_seconds": avg_rt,
+            "sla_breach_percent": breach_rate,
         })
 
     buckets.sort(key=lambda x: x["date"])
     return buckets
 
 
-def analyze_trend(df):
+def analyze_trend(df: pd.DataFrame) -> Dict[str, Any]:
     buckets = build_time_buckets(df)
     if len(buckets) < 2:
-        return {"intent": "trend", "time_buckets": buckets, "has_trend": False}
+        return {
+            "intent": "trend",
+            "time_buckets": buckets,
+            "has_trend": False,
+        }
 
     mid = len(buckets) // 2
     first = buckets[:mid]
     last = buckets[mid:]
 
-    def avg(items, key):
+    def avg_of_key(items, key):
         vals = [x[key] for x in items if x[key] is not None]
-        return sum(vals)/len(vals) if vals else None
+        return float(sum(vals) / len(vals)) if vals else None
+
+    avg_first_rt = avg_of_key(first, "avg_resolution_seconds")
+    avg_last_rt = avg_of_key(last, "avg_resolution_seconds")
+    avg_first_breach = avg_of_key(first, "sla_breach_percent")
+    avg_last_breach = avg_of_key(last, "sla_breach_percent")
 
     return {
         "intent": "trend",
         "time_buckets": buckets,
-        "avg_resolution_first_half": avg(first, "avg_resolution_seconds"),
-        "avg_resolution_second_half": avg(last, "avg_resolution_seconds"),
-        "avg_breach_first_half": avg(first, "sla_breach_percent"),
-        "avg_breach_second_half": avg(last, "sla_breach_percent"),
+        "avg_resolution_first_half": avg_first_rt,
+        "avg_resolution_second_half": avg_last_rt,
+        "avg_breach_first_half": avg_first_breach,
+        "avg_breach_second_half": avg_last_breach,
         "has_trend": True,
     }
 
 
-def analyze_forecast(df):
+def analyze_forecast(df: pd.DataFrame) -> Dict[str, Any]:
     buckets = build_time_buckets(df)
     if len(buckets) < 3:
-        return {"intent": "forecast", "time_buckets": buckets, "has_forecast": False}
+        return {
+            "intent": "forecast",
+            "time_buckets": buckets,
+            "has_forecast": False,
+        }
 
     recent = buckets[-3:]
 
-    def project(values):
+    def project_next(values: List[float]) -> float | None:
         if len(values) < 2:
             return None
-        diffs = [values[i] - values[i-1] for i in range(1, len(values))]
-        return values[-1] + sum(diffs)/len(diffs)
+        diffs = [values[i] - values[i - 1] for i in range(1, len(values))]
+        avg_diff = sum(diffs) / len(diffs)
+        return values[-1] + avg_diff
 
     rt_vals = [b["avg_resolution_seconds"] for b in recent if b["avg_resolution_seconds"] is not None]
     breach_vals = [b["sla_breach_percent"] for b in recent if b["sla_breach_percent"] is not None]
 
+    current_avg_rt = rt_vals[-1] if rt_vals else None
+    current_breach = breach_vals[-1] if breach_vals else None
+    next_rt = project_next(rt_vals) if len(rt_vals) >= 2 else None
+    next_breach = project_next(breach_vals) if len(breach_vals) >= 2 else None
+
     return {
         "intent": "forecast",
         "time_buckets": buckets,
-        "current_avg_resolution_seconds": rt_vals[-1] if rt_vals else None,
-        "forecast_avg_resolution_seconds": project(rt_vals) if len(rt_vals) >= 2 else None,
-        "current_breach_percent": breach_vals[-1] if breach_vals else None,
-        "forecast_breach_percent": project(breach_vals) if len(breach_vals) >= 2 else None,
-        "has_forecast": True,
+        "current_avg_resolution_seconds": current_avg_rt,
+        "forecast_avg_resolution_seconds": next_rt,
+        "current_breach_percent": current_breach,
+        "forecast_breach_percent": next_breach,
+        "has_forecast": True if (next_rt is not None or next_breach is not None) else False,
     }
 
 
-def analyze_executive_summary(df):
+def analyze_executive_summary(df: pd.DataFrame) -> Dict[str, Any]:
+    overview = analyze_overview(df)
+    agent_perf = analyze_agent_performance(df)
+    sla = analyze_sla_summary(df)
+    subject_res = analyze_subject_resolution(df)
+    outliers = analyze_outlier_tickets(df)
+
     return {
         "intent": "executive_summary",
-        "overview": analyze_overview(df),
-        "agent_performance": analyze_agent_performance(df),
-        "sla_summary": analyze_sla_summary(df),
-        "subject_resolution": analyze_subject_resolution(df),
-        "outliers": analyze_outlier_tickets(df),
+        "overview": overview,
+        "agent_performance": agent_perf,
+        "sla_summary": sla,
+        "subject_resolution": subject_res,
+        "outliers": outliers,
     }
 
 
-def analyze_recommendations(df):
+def analyze_recommendations(df: pd.DataFrame) -> Dict[str, Any]:
+    overview = analyze_overview(df)
+    agent_perf = analyze_agent_performance(df)
+    sla = analyze_sla_summary(df)
+    subject_res = analyze_subject_resolution(df)
+    outliers = analyze_outlier_tickets(df)
+    trend = analyze_trend(df)
+
     return {
         "intent": "recommendations",
-        "overview": analyze_overview(df),
-        "agent_performance": analyze_agent_performance(df),
-        "sla_summary": analyze_sla_summary(df),
-        "subject_resolution": analyze_subject_resolution(df),
-        "outliers": analyze_outlier_tickets(df),
-        "trend": analyze_trend(df),
+        "overview": overview,
+        "agent_performance": agent_perf,
+        "sla_summary": sla,
+        "subject_resolution": subject_res,
+        "outliers": outliers,
+        "trend": trend,
     }
 
 
-def analyze_workflow_focus(df):
+def analyze_workflow_focus(df: pd.DataFrame) -> Dict[str, Any]:
+    subject_res = analyze_subject_resolution(df)
+    sla_agents = analyze_sla_by_agent(df)
+    outliers = analyze_outlier_tickets(df)
+
     return {
         "intent": "workflow_focus",
-        "subject_resolution": analyze_subject_resolution(df),
-        "sla_by_agent": analyze_sla_by_agent(df),
-        "outliers": analyze_outlier_tickets(df),
+        "subject_resolution": subject_res,
+        "sla_by_agent": sla_agents,
+        "outliers": outliers,
     }
 
 
-def analyze_other(df, question):
+def analyze_other(df: pd.DataFrame, question: str) -> Dict[str, Any]:
     base = analyze_overview(df)
     base["intent"] = "other"
-    base["note"] = "Fallback pattern detection."
+    base["note"] = "Question did not match a specific pattern; overview-based answer."
     return base
 
 
 # ============================================================
-# PRESENTATION LAYER (UPDATED — NO BOLD/ASTERISKS)
+# PRESENTATION LAYER – Option A (fully autonomous formatting)
 # ============================================================
 
 PRESENTATION_PROMPT = """
 You are MILOlytics, an executive-quality analytics assistant for myBasePay.
 
 You will receive:
-- A structured result dict.
-- Column semantics.
+- A structured "result" dict containing:
+  - intent (what kind of question this was)
+  - computed metrics (numbers, lists, dicts)
+- Column semantics describing what each field means.
 
-Formatting rules:
-- DO NOT use markdown formatting.
-- DO NOT use *, **, _, or any markdown emphasis.
-- Use plain text only.
-- You may use emojis, bullet points, headings (plain text), spacing, and short paragraphs.
-- Do NOT restate the user's question.
+Your job:
+- Produce a final answer in a clean, readable, executive style.
+- DO NOT restate the user's question.
+- Start directly with insight, using a strong header.
+- You may choose the best structure for each answer:
+  * Headings with icons (e.g., 📊, ⏱️, 🧑‍💼, 🚨, 📈, 🔮, 🧭)
+  * Bullet lists for key metrics
+  * Short paragraphs for context
+  * Clearly highlighted risks/opportunities
+- Keep it concise but insightful (no huge walls of text).
+- Use plain language, avoid jargon.
+- Where helpful, explain time-like fields (seconds) in natural terms (hours/days).
+- Adapt the style to the intent:
+  * "overview" / "executive_summary" -> big picture
+  * "agent_performance" -> compare agents clearly
+  * "sla_*" -> focus on risk and reliability
+  * "trend"/"forecast" -> speak about direction over time
+  * "recommendations" -> action-oriented bullets
 
-Style rules:
-- Start with a clear heading using emojis (e.g., 📊 Overview, ⏱️ Resolution Insights).
-- Use bullet lists for metrics.
-- Use short paragraphs for interpretation.
-- Convert seconds into readable time (hours/days).
-- Be concise, clear, and executive.
-- Adapt tone based on intent (overview, trend, forecast, SLA, etc.).
-
-Output plain text only.
+Important:
+- Output plain text only (no markdown code fences).
+- No need to mention the word "intent".
 """
 
 
@@ -557,7 +705,7 @@ def build_final_answer(result: dict) -> str:
     prompt = f"""
 {PRESENTATION_PROMPT}
 
-Here is the structured analysis result:
+Here is the structured analysis result to format:
 
 {json.dumps(result, indent=2)}
 
@@ -570,7 +718,7 @@ Write the final formatted answer:
 
 
 # ============================================================
-# MAIN ENTRYPOINT
+# MAIN ENTRYPOINT USED BY STREAMLIT
 # ============================================================
 
 def run_analysis_for_intent(intent: str, question: str, df: pd.DataFrame) -> Dict[str, Any]:
@@ -608,13 +756,23 @@ def run_analysis_for_intent(intent: str, question: str, df: pd.DataFrame) -> Dic
 
 
 def ask_question(df, question: str, system_text: str = "") -> str:
+    """
+    Main function used by the app.
+
+    Pipeline:
+    1) Classify intent.
+    2) Run deterministic pandas analysis for that intent.
+    3) Use LLM to format a natural-language, executive-style answer.
+    """
     if df is None:
         return "Dataset not loaded."
 
     intent = classify_intent(question)
     result = run_analysis_for_intent(intent, question, df)
-    return build_final_answer(result)
+    final_answer = build_final_answer(result)
+    return final_answer
 
 
+# Optional stub for legacy compatibility (not used by app.py but harmless)
 def build_agent(df, system_text=""):
     return df
