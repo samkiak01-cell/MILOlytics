@@ -12,7 +12,7 @@ from logic.agent import load_excel, ask_question   # build_agent removed
 # =====================================================
 
 st.set_page_config(
-    page_title="Call Sensei",
+    page_title="MBP Call Center Agent",
     layout="wide",
     initial_sidebar_state="expanded"
 )
@@ -127,7 +127,7 @@ header_left, header_right = st.columns([3, 1])
 with header_left:
     st.markdown(
         """
-        <div class="mbp-header-title">Call Sensei - myBasePay Call Center AI Agent</div>
+        <div class="mbp-header-title">myBasePay Call Center AI Agent</div>
         <div class="mbp-header-sub">
             AI-powered insights for call center performance, SLA tracking, and trend detection.
         </div>
@@ -202,7 +202,7 @@ def compute_stats(df: pd.DataFrame):
 left_col, right_col = st.columns([2.7, 1.3])
 
 with left_col:
-    st.subheader("Ask the Sensei a Question")
+    st.subheader("Ask the agent any question")
 
     user_q = st.text_input(
         "Your Question",
