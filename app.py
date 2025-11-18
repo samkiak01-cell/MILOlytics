@@ -12,7 +12,7 @@ from logic.agent import load_excel, ask_question   # build_agent removed
 # =====================================================
 
 st.set_page_config(
-    page_title="MILOlytics – myBasePay Analytics",
+    page_title="Call Sensei",
     layout="wide",
     initial_sidebar_state="expanded"
 )
@@ -202,7 +202,7 @@ def compute_stats(df: pd.DataFrame):
 left_col, right_col = st.columns([2.7, 1.3])
 
 with left_col:
-    st.subheader("Ask MILOlytics a Question")
+    st.subheader("Ask the Sensei a Question")
 
     user_q = st.text_input(
         "Your Question",
