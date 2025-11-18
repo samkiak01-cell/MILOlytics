@@ -14,7 +14,7 @@ from logic.agent import load_excel, build_agent, ask_question
 st.set_page_config(
     page_title="MILOlytics – myBasePay Analytics",
     layout="wide",
-    initial_sidebar_state="expanded"
+    initial_sidebar_state="expanded",
 )
 
 
@@ -51,7 +51,7 @@ st.markdown(
     color: var(--mbp-subtext);
 }
 
-/* White oval logo container */
+/* Logo placement */
 .mbp-logo-wrapper {
     background: white;
     padding: 12px 22px;
@@ -101,7 +101,7 @@ st.markdown(
     color: #020617;
 }
 
-/* Sidebar */
+/* Sidebar styling */
 [data-testid="stSidebar"] {
     background: radial-gradient(circle at top, #020617, #030712);
     color: var(--mbp-text);
@@ -112,7 +112,7 @@ st.markdown(
     color: var(--mbp-text);
 }
 
-/* Text Input */
+/* Dark text input */
 .stTextInput>div>div>input {
     background-color: #020617;
     color: var(--mbp-text);
@@ -120,7 +120,7 @@ st.markdown(
     border: 1px solid #1f2937;
 }
 
-/* File Uploader */
+/* File uploader */
 [data-testid="stFileUploader"] section {
     background-color: #020617;
     border-radius: 10px;
@@ -144,7 +144,7 @@ with header_left:
         """
         <div class="mbp-header-title">MILOlytics – myBasePay Ticket Assistant</div>
         <div class="mbp-header-sub">
-            Real-time performance insights, SLA monitoring, and call center analytics.
+            Our internal analytics agent for ticket resolution trends, SLA tracking, and call center insights.
         </div>
         """,
         unsafe_allow_html=True,
@@ -153,9 +153,7 @@ with header_left:
 with header_right:
     logo_path = Path("mybasepay_logo.png")
     if logo_path.exists():
-        st.markdown("<div class='mbp-logo-wrapper'>", unsafe_allow_html=True)
-        st.image(str(logo_path), width=115)
-        st.markdown("</div>", unsafe_allow_html=True)
+        st.image(str(logo_path), width=120)
     else:
         st.write("")
 
@@ -169,12 +167,10 @@ st.markdown("---")
 st.sidebar.header("Upload Dataset")
 
 uploaded_file = st.sidebar.file_uploader(
-    "Upload Demo Data (.xlsx)",
+    "Upload your Demo Data Excel (.xlsx)",
     type=["xlsx"],
-    help="Upload your Demo Data file or rely on the default dataset.",
 )
 
-# Default Demo Data file
 default_path = Path("data/Demo Data.xlsx")
 
 
@@ -190,7 +186,7 @@ system_text = ""
 sample_questions = []
 data_loaded = False
 
-# Load dataset logic
+
 if uploaded_file:
     try:
         df_data, system_text, sample_questions = load_source(uploaded_file.read())
@@ -203,13 +199,13 @@ elif default_path.exists():
     try:
         df_data, system_text, sample_questions = load_source(None)
         data_loaded = True
-        st.sidebar.info("Using default Demo Data.xlsx")
+        st.sidebar.info("Using default dataset: Demo Data.xlsx")
     except Exception as e:
         st.sidebar.error(f"Error loading default dataset: {e}")
 
 
 # =====================================================
-# Helper Functions (Aligned with Demo Data + agent.py)
+# Helper Functions
 # =====================================================
 
 def human_time(seconds):
@@ -221,80 +217,46 @@ def human_time(seconds):
     return f"{int(seconds):,} sec ({hours:.1f} hrs / {days:.1f} days)"
 
 
-def format_agent_group(names, seconds_value):
-    """Pretty-print fastest/slowest agents with ties."""
-    if not names:
-        return "N/A"
-    label_time = human_time(seconds_value)
-    if len(names) == 1:
-        return f"{names[0]} ({label_time})"
-    if len(names) == 2:
-        return f"{names[0]} & {names[1]} ({label_time})"
-    # 3+ names
-    return f"{', '.join(names[:2])} + {len(names)-2} others ({label_time})"
-
-
 def compute_stats(df: pd.DataFrame):
-    """
-    Quick Stats aligned with the Demo Data schema and agent logic:
-    - Resolution_Time_Seconds for durations
-    - Resolved_By for agent performance
-    - SLA_Met for SLA compliance
-    """
-    stats = {
-        "total": len(df),
-        "avg": "N/A",
-        "min": "N/A",
-        "max": "N/A",
-        "fastest_agent": "N/A",
-        "slowest_agent": "N/A",
-        "sla_rate": None,
-        "outside_sla": None,
-    }
+    stats = {}
 
-    # --- Resolution time stats ---
-    if "Resolution_Time_Seconds" in df.columns:
-        rt = pd.to_numeric(df["Resolution_Time_Seconds"], errors="coerce").dropna()
+    # --- Total Tickets ---
+    stats["total"] = len(df)
+
+    # --- Resolution Time ---
+    if "Resolution_TimeSeconds" in df.columns:
+        rt = pd.to_numeric(df["Resolution_TimeSeconds"], errors="coerce").dropna()
         if len(rt) > 0:
             stats["avg"] = human_time(rt.mean())
             stats["min"] = human_time(rt.min())
             stats["max"] = human_time(rt.max())
+        else:
+            stats["avg"] = stats["min"] = stats["max"] = "N/A"
 
-    # --- Agent performance (fastest/slowest by avg resolution) ---
-    if "Resolved_By" in df.columns and "Resolution_Time_Seconds" in df.columns:
-        df_agents = df.dropna(subset=["Resolved_By", "Resolution_Time_Seconds"]).copy()
-        df_agents["Resolution_Time_Seconds"] = pd.to_numeric(
-            df_agents["Resolution_Time_Seconds"], errors="coerce"
-        )
-        df_agents = df_agents.dropna(subset=["Resolution_Time_Seconds"])
-        if not df_agents.empty:
-            grouped = df_agents.groupby("Resolved_By")["Resolution_Time_Seconds"].mean()
-            if len(grouped) > 0:
-                min_val = grouped.min()
-                max_val = grouped.max()
-                fastest_names = list(grouped[grouped == min_val].index)
-                slowest_names = list(grouped[grouped == max_val].index)
-                stats["fastest_agent"] = format_agent_group(fastest_names, min_val)
-                stats["slowest_agent"] = format_agent_group(slowest_names, max_val)
+    # --- Fastest / Slowest Agent ---
+    if "Agent" in df.columns and "Resolution_TimeSeconds" in df.columns:
+        df2 = df.dropna(subset=["Agent", "Resolution_TimeSeconds"])
+        if len(df2) > 0:
+            grouped = df2.groupby("Agent")["Resolution_TimeSeconds"].mean()
 
-    # --- SLA from SLA_Met if available ---
+            fast_agent = grouped.idxmin()
+            slow_agent = grouped.idxmax()
+
+            stats["fastest_agent"] = f"{fast_agent} ({human_time(grouped.min())})"
+            stats["slowest_agent"] = f"{slow_agent} ({human_time(grouped.max())})"
+        else:
+            stats["fastest_agent"] = stats["slowest_agent"] = "N/A"
+
+    # --- SLA Compliance ---
     if "SLA_Met" in df.columns:
-        sla_series = df["SLA_Met"].dropna().astype(str).str.lower()
-        total_sla = len(sla_series)
-        if total_sla > 0:
-            met_mask = sla_series.isin(["yes", "y", "true", "1"])
-            met_count = int(met_mask.sum())
-            not_met = total_sla - met_count
-            stats["sla_rate"] = met_count / total_sla * 100
-            stats["outside_sla"] = not_met
-
-    # Fallback SLA based on dates only if SLA_Met missing or unusable
-    if stats["sla_rate"] is None and "Due_Date" in df.columns and "Resolved_Date" in df.columns:
-        valid = df.dropna(subset=["Due_Date", "Resolved_Date"])
-        if len(valid) > 0:
-            late = (valid["Resolved_Date"] > valid["Due_Date"]).sum()
-            stats["sla_rate"] = 100 - (late / len(valid) * 100)
-            stats["outside_sla"] = late
+        total_resolved = df["SLA_Met"].notna().sum()
+        if total_resolved > 0:
+            sla_yes = (df["SLA_Met"].astype(str).str.lower() == "yes").sum()
+            stats["sla_rate"] = (sla_yes / total_resolved) * 100
+            stats["outside_sla"] = total_resolved - sla_yes
+        else:
+            stats["sla_rate"] = None
+            stats["outside_sla"] = None
 
     return stats
 
@@ -307,7 +269,7 @@ if data_loaded and df_data is not None:
 
     left_col, right_col = st.columns([2.7, 1.3])
 
-    # LEFT SIDE — Ask MILOlytics
+    # LEFT SIDE — Ask Questions
     with left_col:
 
         st.subheader("Ask MILOlytics a Question")
