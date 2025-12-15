@@ -7,16 +7,12 @@ import pandas as pd
 from langchain_openai import ChatOpenAI
 
 
-# ============================================================
 # GLOBAL LLM
-# ============================================================
 
 llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
 
 
-# ============================================================
 # LOAD EXCEL – Demo schema, sheet "Data"
-# ============================================================
 
 def load_excel(
     source: Union[str, Path, IO[bytes]]
@@ -85,7 +81,6 @@ def load_excel(
     return df, system_text, sample_questions
 
 
-# ============================================================
 # COLUMN SEMANTICS (for LLM context)
 # ============================================================
 
@@ -124,10 +119,7 @@ Key rules:
     * Forecast is a naive extrapolation of recent changes.
 """
 
-
-# ============================================================
 # INTENT CLASSIFICATION (Layer 1)
-# ============================================================
 
 INTENT_PROMPT = """
 You classify user questions about a call center ticket dataset.
@@ -166,7 +158,6 @@ ALLOWED_INTENTS = {
 def classify_intent(question: str) -> str:
     q = question.lower()
 
-    # --- Hard rules FIRST for stability ---
     trend_keywords = ["pattern", "patterns", "trend", "trends"]
     if any(k in q for k in trend_keywords):
         return "trend"
