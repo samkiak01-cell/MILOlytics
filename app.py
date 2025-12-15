@@ -4,12 +4,10 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
-from logic.agent import load_excel, ask_question   # build_agent removed
+from logic.agent import load_excel, ask_question  
 
 
-# =====================================================
 # Page Config
-# =====================================================
 
 st.set_page_config(
     page_title="MBP Call Center Agent",
@@ -18,9 +16,7 @@ st.set_page_config(
 )
 
 
-# =====================================================
 # Dark MyBasePay Dashboard CSS
-# =====================================================
 
 st.markdown(
     """
@@ -118,9 +114,7 @@ st.markdown(
 )
 
 
-# =====================================================
 # Header (Title + Logo)
-# =====================================================
 
 header_left, header_right = st.columns([3, 1])
 
@@ -145,19 +139,15 @@ with header_right:
 st.markdown("---")
 
 
-# =====================================================
-# Load Dataset (NOT from upload — from repository)
-# =====================================================
+# Load Dataset
 
-DATA_PATH = Path("data/Demo Data.xlsx")   # your real demo data
+DATA_PATH = Path("data/Demo Data.xlsx")   
 
 df_data, system_text, sample_questions = load_excel(DATA_PATH)
 data_loaded = True
 
 
-# =====================================================
 # Helper Functions
-# =====================================================
 
 def human_time(seconds):
     if pd.isna(seconds):
@@ -195,9 +185,7 @@ def compute_stats(df: pd.DataFrame):
     return stats
 
 
-# =====================================================
 # Main UI
-# =====================================================
 
 left_col, right_col = st.columns([2.7, 1.3])
 
